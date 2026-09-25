@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.0
 
 ### Added
 - Admin mode manages every organization the account owns or administers.
