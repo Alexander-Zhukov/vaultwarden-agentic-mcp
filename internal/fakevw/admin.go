@@ -10,12 +10,34 @@ import (
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/bitwarden"
 )
 
-// AddMember puts an account into an organization with a role, confirmed.
-func (s *Server) AddMember(orgID string, a *Account, role bitwarden.MemberType) {
+// AddMember puts an account into an organization with a role and status.
+func (s *Server) AddMember(orgID string, a *Account, role bitwarden.MemberType, status bitwarden.MemberStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	o := s.orgs[orgID]
-	o.members = append(o.members, &member{id: newID(), userID: a.ID, email: a.Email, status: bitwarden.MemberConfirmed, role: role})
+	o.members = append(o.members, &member{id: newID(), userID: a.ID, email: a.Email, status: status, role: role})
+}
+
+// AddManagerOfAll puts an account into an organization as a manager of every
+// collection.
+func (s *Server) AddManagerOfAll(orgID string, a *Account) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o := s.orgs[orgID]
+	o.members = append(o.members, &member{id: newID(), userID: a.ID, email: a.Email, status: bitwarden.MemberConfirmed, role: bitwarden.MemberManager, accessAll: true})
+}
+
+// MemberAccessAll reports whether an account manages every collection of an
+// organization.
+func (s *Server) MemberAccessAll(orgID, email string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.orgs[orgID].members {
+		if m.email == email {
+			return m.accessAll
+		}
+	}
+	return false
 }
 
 // panel is the fake admin panel: the accounts it created by invitation, the
@@ -53,12 +75,11 @@ func (s *Server) AdminLogins() int {
 func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin", s.adminLogin)
 	mux.HandleFunc("GET /admin/users", s.panelAuthed(s.adminUsers))
-	mux.HandleFunc("GET /admin/users/by-mail/{email}", s.panelAuthed(s.adminUserByMail))
-	mux.HandleFunc("GET /admin/users/{id}", s.panelAuthed(s.adminUser))
 	mux.HandleFunc("POST /admin/invite", s.panelAuthed(s.panelJSON(s.adminInvite)))
 	mux.HandleFunc("POST /admin/users/{id}/invite/resend", s.panelAuthed(s.panelJSON(s.adminAction("resend"))))
 	mux.HandleFunc("POST /admin/users/{id}/{action}", s.panelAuthed(s.panelJSON(s.adminAction(""))))
 	mux.HandleFunc("POST /admin/organizations/{id}/delete", s.panelAuthed(s.panelJSON(s.adminDeleteOrg)))
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, "1.36.0") })
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{"version": "2025.12.0", "server": map[string]string{"name": "Vaultwarden", "url": "https://github.com/dani-garcia/vaultwarden"}})
 	})
@@ -107,32 +128,34 @@ func (s *Server) panelJSON(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// userJSON is an account as /admin/users shows it: disabled only through
+// userEnabled, and only confirmed memberships, a manager as the custom type.
 func (s *Server) userJSON(id string) map[string]any {
 	enabled := !s.panel.disabled[id]
+	stamp := time.Now().UTC().Format("2006-01-02 15:04:05 +00:00")
 	if email, ok := s.panel.invited[id]; ok {
 		return map[string]any{
 			"id": id, "email": email, "name": email, "_status": 1, "userEnabled": enabled,
-			"twoFactorEnabled": false, "createdAt": time.Now().UTC().Format("2006-01-02 15:04:05 +00:00"),
-			"lastActive": nil, "organizations": []any{},
+			"twoFactorEnabled": false, "createdAt": stamp, "lastActive": nil, "organizations": []any{},
 		}
 	}
 	a := s.accounts[id]
-	status := 0
-	if !enabled {
-		status = 2
-	}
 	orgs := []any{}
 	for _, o := range s.orgs {
 		for _, m := range o.members {
-			if m.userID == id {
-				orgs = append(orgs, map[string]any{"id": o.id, "name": o.name, "type": m.role, "status": m.status})
+			if m.userID != id || m.status != bitwarden.MemberConfirmed {
+				continue
 			}
+			role := m.role
+			if role == bitwarden.MemberManager {
+				role = bitwarden.MemberCustom
+			}
+			orgs = append(orgs, map[string]any{"id": o.id, "name": o.name, "type": role, "status": m.status})
 		}
 	}
-	last := time.Now().UTC().Format("2006-01-02 15:04:05 +00:00")
 	return map[string]any{
-		"id": a.ID, "email": a.Email, "name": a.Email, "_status": status, "userEnabled": enabled,
-		"twoFactorEnabled": false, "createdAt": last, "lastActive": last, "organizations": orgs,
+		"id": a.ID, "email": a.Email, "name": a.Email, "_status": 0, "userEnabled": enabled,
+		"twoFactorEnabled": false, "createdAt": stamp, "lastActive": stamp, "organizations": orgs,
 	}
 }
 
@@ -156,28 +179,6 @@ func (s *Server) adminUsers(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, out)
 }
 
-func (s *Server) adminUser(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, ok := s.accounts[id]; !ok {
-		if _, ok := s.panel.invited[id]; !ok {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-	}
-	writeJSON(w, s.userJSON(id))
-}
-
-func (s *Server) adminUserByMail(w http.ResponseWriter, r *http.Request) {
-	email := r.PathValue("email")
-	for _, id := range s.userIDs() {
-		if strings.EqualFold(s.userJSON(id)["email"].(string), email) {
-			writeJSON(w, s.userJSON(id))
-			return
-		}
-	}
-	w.WriteHeader(http.StatusNotFound)
-}
-
 func (s *Server) adminInvite(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Email string `json:"email"`
@@ -188,13 +189,15 @@ func (s *Server) adminInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, id := range s.userIDs() {
 		if strings.EqualFold(s.userJSON(id)["email"].(string), in.Email) {
-			fail(w, http.StatusBadRequest, "User already exists")
+			fail(w, http.StatusConflict, "User already exists")
 			return
 		}
 	}
 	id := newID()
 	s.panel.invited[id] = in.Email
-	writeJSON(w, s.userJSON(id))
+	// The invitation answers with the bare profile, without the panel's extra
+	// fields.
+	writeJSON(w, map[string]any{"id": id, "email": in.Email, "name": in.Email, "_status": 1, "creationDate": time.Now().UTC().Format(time.RFC3339Nano)})
 }
 
 func (s *Server) adminAction(fixed string) http.HandlerFunc {
@@ -215,8 +218,18 @@ func (s *Server) adminAction(fixed string) http.HandlerFunc {
 			s.panel.disabled[id] = true
 		case "enable":
 			delete(s.panel.disabled, id)
-		case "deauth", "resend":
+		case "deauth":
+		case "resend":
+			if account {
+				fail(w, http.StatusBadRequest, "User already accepted invitation")
+			}
 		case "delete":
+			for _, o := range s.orgs {
+				if s.lastOwner(o, id) {
+					fail(w, http.StatusBadRequest, "Can't delete last owner")
+					return
+				}
+			}
 			delete(s.accounts, id)
 			delete(s.panel.invited, id)
 			for _, o := range s.orgs {
@@ -240,4 +253,17 @@ func (s *Server) adminDeleteOrg(w http.ResponseWriter, r *http.Request) {
 			delete(s.collections, cid)
 		}
 	}
+}
+
+// lastOwner reports whether an account is the only confirmed owner of an
+// organization, which Vaultwarden refuses to delete.
+func (s *Server) lastOwner(o *organization, userID string) bool {
+	owners, self := 0, false
+	for _, m := range o.members {
+		if m.role == bitwarden.MemberOwner && m.status == bitwarden.MemberConfirmed {
+			owners++
+			self = self || m.userID == userID
+		}
+	}
+	return self && owners == 1
 }

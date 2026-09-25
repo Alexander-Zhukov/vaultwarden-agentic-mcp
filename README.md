@@ -13,7 +13,7 @@ Encryption is done in the server, as in the official clients; Vaultwarden stores
 | Tool | Description |
 |---|---|
 | `get_status` | Account, mode, visible collections, enabled capabilities |
-| `list_collections` | Collections with their organization, item counts and access; members in admin mode |
+| `list_collections` | Collections with their organization, item counts and access, optionally of one organization; members in admin mode |
 | `list_items` | Item metadata by collection, type or trash |
 | `search_items` | Find items by name, username, URI, notes, field names; never searches values |
 | `get_item` | Everything except secret values: notes, fields, attachments, SSH public key, fingerprints |
@@ -53,11 +53,13 @@ Server mode has a tool set of its own:
 | `get_status` | Server, account and organization counts, enabled capabilities |
 | `list_users` | Accounts with status, two-step login, last activity, organizations |
 | `get_user` | One account by email or id |
-| `list_organizations` | Every organization of the server with members and owners |
+| `list_organizations` | Organizations of the server with their confirmed members and owners |
 | `invite_user` | Invited account for an address, so the person can register with sign-ups closed |
 | `change_user` | Disable, enable, end every session, resend the invitation |
-| `delete_user` | Delete an account; two steps, refused for the only owner of an organization |
-| `delete_organization` | Delete an organization with its contents; two steps, confirmed by its name |
+| `delete_user` | Delete an account; two calls with a confirmation code, refused for the last confirmed owner or member of an organization |
+| `delete_organization` | Delete an organization with its contents; two calls with a confirmation code |
+
+The admin panel reports confirmed memberships only: an organization without a confirmed member is not listed, and is deleted by id.
 
 Tools of a disabled capability are not registered. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`).
 
@@ -78,7 +80,7 @@ share_with_human(item="WIFI", max_access=1)
 
 ## Accounts, instances, clients
 
-One process serves one Vaultwarden account; the account's membership is the boundary of what it can reach. Several agents may share an instance with their own bearer tokens, each optionally narrowed to read-only use or to some collections.
+A consumer or admin process serves one Vaultwarden account; the account's membership is the boundary of what it can reach. Several agents may share an instance with their own bearer tokens, each optionally narrowed to read-only use or to some collections.
 
 | Mode | Acts as | Does |
 |---|---|---|
@@ -106,8 +108,8 @@ A server-mode instance holds the key to every account of the server; run it sepa
 | `VWMCP_ADMIN_TOKEN` | Server mode only | — | The server's `ADMIN_TOKEN` in plain form |
 | `VWMCP_CLIENTS` | Yes (http) | — | `name:sha256(token)[:read_only][:collections=a\|b]`, comma-separated |
 | `VWMCP_MODE` | No | `consumer` | `consumer`, `admin` or `server` |
-| `VWMCP_ORGANIZATION` | No | all | Organizations admin mode manages, names or ids, comma-separated |
-| `VWMCP_ALLOW_WRITE` | No | `false` | Create, change and delete items; admin changes |
+| `VWMCP_ORGANIZATION` | No | all | Organizations admin mode manages: exact names or ids, comma-separated |
+| `VWMCP_ALLOW_WRITE` | No | `false` | Create, change and delete items; admin changes; in server mode, invitations and account changes |
 | `VWMCP_ALLOW_SHARE` | No | `false` | `share_with_human` (with write) |
 | `VWMCP_ALLOW_REVEAL` | No | `false` | `get_secret`, `get_attachment` |
 | `VWMCP_ALLOW_PERMANENT_DELETE` | No | `false` | Delete without the trash; in server mode, delete accounts and organizations |
@@ -173,7 +175,7 @@ docker build -t vaultwarden-agentic-mcp .
 | `/mcp` | Streamable HTTP, bearer token |
 | `/v1/links/{token}`, `/v1/upload/{token}` | One-time links |
 | `/health` | Process is alive |
-| `/ready` | Logged in and the last sync succeeded |
+| `/ready` | Logged in and the last sync succeeded; in server mode, the last admin panel check |
 | `/metrics` | Prometheus; expiry is exported as counts, without item names |
 
 ## How it works

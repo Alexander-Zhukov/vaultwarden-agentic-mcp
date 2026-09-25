@@ -206,7 +206,8 @@ type Tuning struct {
 	AuthMaxSources int
 }
 
-// Config is the validated configuration of one instance: one account.
+// Config is the validated configuration of one instance: one account, or in
+// server mode one server's admin panel.
 type Config struct {
 	Account string
 	Mode    Mode
@@ -546,19 +547,23 @@ func (c *Config) validate(r *envReader) {
 	}
 }
 
+// vaultOnly are the settings that mean something only with an account.
+var vaultOnly = []string{
+	"VWMCP_ORGANIZATION", "VWMCP_WEB_URL", "VWMCP_DEVICE_NAME",
+	"VWMCP_ALLOW_REVEAL", "VWMCP_ALLOW_SHARE", "VWMCP_ALLOW_ADMIN_ROLES",
+	"VWMCP_PUBLIC_URL", "VWMCP_LINK_TTL", "VWMCP_UPLOAD_TTL", "VWMCP_LINK_SOURCES",
+	"VWMCP_SHARE_TTL", "VWMCP_MAX_SHARE_TTL",
+	"VWMCP_NOTES_PREFIXES", "VWMCP_EXPIRY_FIELD", "VWMCP_EXPIRY_HORIZON",
+	"VWMCP_SYNC_TTL", "VWMCP_MAX_ATTACHMENT_BYTES", "VWMCP_TOKEN_MARGIN",
+	"VWMCP_FIND_PER_MINUTE", "VWMCP_MAX_UPLOAD_VALUE_BYTES", "VWMCP_MAX_LINKS",
+}
+
 // validateServerMode refuses settings of the vault modes that mean nothing
 // without an account: they would read as protections or features that are not
 // there.
 func (c *Config) validateServerMode(r *envReader) {
-	unused := map[string]bool{
-		"VWMCP_PUBLIC_URL":        c.Links.Enabled(),
-		"VWMCP_ALLOW_REVEAL":      c.Caps.AllowReveal,
-		"VWMCP_ALLOW_SHARE":       c.Caps.AllowShare,
-		"VWMCP_ALLOW_ADMIN_ROLES": c.Caps.AllowAdminRoles,
-		"VWMCP_ORGANIZATION":      len(c.Organizations) > 0,
-	}
-	for name, set := range unused {
-		if set {
+	for _, name := range vaultOnly {
+		if _, ok := r.value(name); ok {
 			r.fail(name, "has no effect in server mode; remove it")
 		}
 	}

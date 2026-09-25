@@ -2,6 +2,7 @@ package mcpserver_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -79,4 +80,63 @@ func TestAdminSeveralOrganizations(t *testing.T) {
 
 	narrow := h.session(ctx, "narrow")
 	call(ctx, t, narrow, "list_organizations", nil, "narrowed")
+	call(ctx, t, op, "list_collections", map[string]any{"organization": "Machine"}, "not managed by this instance")
+}
+
+// TestOrganizationAllowList checks that the allow-list takes exact names and
+// ids only: anyone can create an organization with a look-alike name, or with
+// another organization's id as its name, and invite this account into it.
+func TestOrganizationAllowList(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	h, fake, owner := fakeHarness(t, config.ModeAdmin, false)
+	machineID, _ := fake.AddOrganization(owner, "machine", "x")
+	fake.AddOrganization(owner, machineID, "y")
+	op := h.session(ctx, "op")
+
+	managed := func() []string {
+		var out []string
+		for _, o := range items(call(ctx, t, op, "list_organizations", nil, ""), "organizations") {
+			if m := o.(map[string]any); m["managed"] == true {
+				out = append(out, m["name"].(string))
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	h.cfg.Organizations = []string{"Machine"}
+	if got := managed(); !slices.Equal(got, []string{"Machine"}) {
+		t.Fatalf("an exact name admits %v", got)
+	}
+	h.cfg.Organizations = []string{machineID}
+	if got := managed(); !slices.Equal(got, []string{"machine"}) {
+		t.Fatalf("an id admits %v", got)
+	}
+	// The id wins over an organization named after it.
+	if got := call(ctx, t, op, "list_members", map[string]any{"organization": machineID}, "")["organization"]; got != "machine" {
+		t.Fatalf("id resolved to %v", got)
+	}
+}
+
+// TestAdminKeepsManagerAccess checks that changing a manager of every
+// collection keeps that access, and that collection names are looked up in
+// the organization being managed.
+func TestAdminKeepsManagerAccess(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	h, fake, owner := fakeHarness(t, config.ModeAdmin, false)
+	labID, _ := fake.AddOrganization(owner, "Lab", "infra")
+	manager := fake.AddAccount("manager@example.test", "manager-pw")
+	fake.AddManagerOfAll(labID, manager)
+	op := h.session(ctx, "op")
+
+	call(ctx, t, op, "update_member", map[string]any{"organization": "Lab", "member": manager.Email, "role": "manager"}, "")
+	if !fake.MemberAccessAll(labID, manager.Email) {
+		t.Fatal("the manager lost access to every collection")
+	}
+	// infra exists in both organizations; within Lab it is not ambiguous.
+	newcomer := fake.AddAccount("newcomer@example.test", "newcomer-pw")
+	call(ctx, t, op, "invite_member", map[string]any{"organization": "Lab", "email": newcomer.Email, "collections": []map[string]any{{"collection": "infra"}}}, "")
 }

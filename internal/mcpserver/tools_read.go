@@ -91,8 +91,17 @@ func (s *server) registerRead(srv *mcp.Server) {
 			if err != nil {
 				return listCollectionsOutput{}, err
 			}
+			if in.Organization != "" {
+				// A filter naming an unknown or unmanaged organization is an
+				// error, not an empty list.
+				admin, err := s.Vault.Admin(ctx, in.Organization, s.Config.Organizations)
+				if err != nil {
+					return listCollectionsOutput{}, err
+				}
+				in.Organization = admin.OrganizationID()
+			}
 			for _, o := range orgs {
-				if !o.Managed || !matchesOrg(o.ID, o.Name, in.Organization) {
+				if !o.Managed || (in.Organization != "" && o.ID != in.Organization) {
 					continue
 				}
 				admin, err := s.Vault.Admin(ctx, o.ID, s.Config.Organizations)

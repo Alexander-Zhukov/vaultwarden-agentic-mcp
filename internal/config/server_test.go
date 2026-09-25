@@ -41,6 +41,7 @@ func TestServerMode(t *testing.T) {
 		{"links", map[string]string{"VWMCP_PUBLIC_URL": "https://mcp.example.test"}, "", "VWMCP_PUBLIC_URL: has no effect in server mode"},
 		{"reveal", map[string]string{"VWMCP_ALLOW_REVEAL": "true"}, "", "VWMCP_ALLOW_REVEAL"},
 		{"organization", map[string]string{"VWMCP_ORGANIZATION": "Machine"}, "", "VWMCP_ORGANIZATION"},
+		{"vault tuning", map[string]string{"VWMCP_SYNC_TTL": "10s"}, "", "VWMCP_SYNC_TTL: has no effect in server mode"},
 		{"narrowed client", map[string]string{"VWMCP_CLIENTS": "agent:" + hashA + ":collections=infra"}, "", "sees no collections"},
 	}
 	for _, tt := range tests {

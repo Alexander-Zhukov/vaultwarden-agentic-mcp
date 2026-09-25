@@ -85,12 +85,12 @@ func TestLiveServerMode(t *testing.T) {
 	op := h.session(ctx, "op")
 
 	status := call(ctx, t, op, "get_status", nil, "")
-	if !strings.HasPrefix(status["server_version"].(string), "Vaultwarden, API 20") {
+	if !strings.HasPrefix(status["server_version"].(string), "Vaultwarden 1.36") {
 		t.Fatalf("status %v", status)
 	}
 	got := call(ctx, t, op, "get_user", map[string]any{"user": owner.Email}, "")
 	orgs := got["organizations"].([]any)
-	if got["status"] != "active" || len(orgs) != 1 || orgs[0].(map[string]any)["role"] != "owner" || orgs[0].(map[string]any)["status"] != "confirmed" {
+	if got["status"] != "active" || len(orgs) != 1 || orgs[0].(map[string]any)["role"] != "owner" {
 		t.Fatalf("owner %v", got)
 	}
 	if byID := call(ctx, t, op, "get_user", map[string]any{"user": got["id"]}, ""); byID["email"] != owner.Email {
@@ -115,17 +115,20 @@ func TestLiveServerMode(t *testing.T) {
 		t.Fatalf("invite %v", inv)
 	}
 	call(ctx, t, op, "change_user", map[string]any{"user": newcomer, "action": "resend_invite"}, "")
-	call(ctx, t, op, "delete_user", map[string]any{"user": newcomer, "confirm": newcomer}, "")
+	code := call(ctx, t, op, "delete_user", map[string]any{"user": newcomer}, "")["confirm"]
+	call(ctx, t, op, "delete_user", map[string]any{"user": newcomer, "confirm": code}, "")
 	call(ctx, t, op, "get_user", map[string]any{"user": newcomer}, "not found")
 
-	call(ctx, t, op, "delete_user", map[string]any{"user": owner.Email, "confirm": owner.Email}, "only owner")
-	call(ctx, t, op, "delete_organization", map[string]any{"organization": orgName, "confirm": orgName}, "")
+	call(ctx, t, op, "delete_user", map[string]any{"user": owner.Email}, "only confirmed owner")
+	orgCode := call(ctx, t, op, "delete_organization", map[string]any{"organization": orgName}, "")["confirm"]
+	call(ctx, t, op, "delete_organization", map[string]any{"organization": orgName, "confirm": orgCode}, "")
 	for _, o := range items(call(ctx, t, op, "list_organizations", nil, ""), "organizations") {
 		if o.(map[string]any)["name"] == orgName {
 			t.Fatalf("%s survived its deletion", orgName)
 		}
 	}
-	call(ctx, t, op, "delete_user", map[string]any{"user": owner.Email, "confirm": owner.Email}, "")
+	ownerCode := call(ctx, t, op, "delete_user", map[string]any{"user": owner.Email}, "")["confirm"]
+	call(ctx, t, op, "delete_user", map[string]any{"user": owner.Email, "confirm": ownerCode}, "")
 }
 
 // TestLiveSeveralOrganizations manages two organizations of one account and

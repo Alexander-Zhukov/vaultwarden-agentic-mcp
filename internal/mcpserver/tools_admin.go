@@ -75,7 +75,14 @@ func (c *call) admin(ctx context.Context, write bool, org string) (*vault.Admin,
 			return nil, err
 		}
 	}
-	return c.server.Vault.Admin(ctx, org, c.server.Config.Organizations)
+	admin, err := c.server.Vault.Admin(ctx, org, c.server.Config.Organizations)
+	if err != nil {
+		return nil, err
+	}
+	// With several organizations managed, the audit record must say which one
+	// a change touched.
+	c.note(slog.String("organization", admin.OrganizationName()))
+	return admin, nil
 }
 
 func (s *server) registerAdminRead(srv *mcp.Server) {

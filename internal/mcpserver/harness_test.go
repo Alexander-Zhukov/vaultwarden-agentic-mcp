@@ -63,8 +63,6 @@ type setup struct {
 	// adminToken starts the instance in server mode.
 	adminToken      string
 	permanentDelete bool
-	// httpClient reaches the server; nil is the default client.
-	httpClient *http.Client
 }
 
 func start(t *testing.T, s setup) *harness {
@@ -108,8 +106,8 @@ func start(t *testing.T, s setup) *harness {
 	if s.mode == config.ModeServer {
 		cfg.Links = config.Links{}
 		admin, err = vwadmin.New(vwadmin.Config{
-			BaseURL: s.serverURL, Token: config.Secret(s.adminToken), HTTP: s.httpClient, Timeout: 30 * time.Second,
-			MaxResponseBytes: 32 << 20, UserAgent: "mcp-test",
+			BaseURL: s.serverURL, Token: config.Secret(s.adminToken), Timeout: 30 * time.Second,
+			MaxResponseBytes: 32 << 20, UserAgent: "mcp-test", BackoffMin: time.Second, BackoffMax: time.Second,
 		})
 	} else {
 		v, err = vault.New(vault.Config{

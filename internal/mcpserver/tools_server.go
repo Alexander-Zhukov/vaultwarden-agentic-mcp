@@ -2,12 +2,16 @@ package mcpserver
 
 import (
 	"context"
-	"errors"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -17,10 +21,9 @@ import (
 )
 
 type serverMembershipView struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Role   string `json:"role" jsonschema:"owner, admin, manager or user"`
-	Status string `json:"status" jsonschema:"invited, accepted, confirmed or revoked"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Role string `json:"role" jsonschema:"owner, admin, manager or user"`
 }
 
 type userView struct {
@@ -31,69 +34,54 @@ type userView struct {
 	TwoFactor     bool                   `json:"two_factor"`
 	Created       string                 `json:"created,omitempty"`
 	LastActive    string                 `json:"last_active,omitempty"`
-	Organizations []serverMembershipView `json:"organizations,omitempty"`
+	Organizations []serverMembershipView `json:"organizations,omitempty" jsonschema:"confirmed memberships only; the admin panel lists no others"`
 }
 
 func userStatus(u vwadmin.User) string {
 	switch {
+	case u.Disabled():
+		return "disabled"
 	case u.Status == vwadmin.StatusInvited:
 		return "invited"
-	case u.Status == vwadmin.StatusDisabled, u.Enabled != nil && !*u.Enabled:
-		return "disabled"
 	default:
 		return "active"
 	}
 }
 
-func memberRole(t int) string {
-	switch bitwarden.MemberType(t) {
-	case bitwarden.MemberOwner:
-		return "owner"
-	case bitwarden.MemberAdmin:
-		return "admin"
-	case bitwarden.MemberManager, bitwarden.MemberCustom:
-		return "manager"
-	case bitwarden.MemberUser:
-		return "user"
-	default:
-		return fmt.Sprintf("type_%d", t)
+func (s *server) toUserView(u vwadmin.User) userView {
+	v := userView{ID: u.ID, Email: u.Email, Name: u.Name, Status: userStatus(u), TwoFactor: u.TwoFactor}
+	created := u.CreatedAt
+	if created == "" {
+		created = u.CreationDate
 	}
-}
-
-func membershipStatus(s int) string {
-	switch bitwarden.MemberStatus(s) {
-	case bitwarden.MemberRevoked:
-		return "revoked"
-	case bitwarden.MemberInvited:
-		return "invited"
-	case bitwarden.MemberAccepted:
-		return "accepted"
-	case bitwarden.MemberConfirmed:
-		return "confirmed"
-	default:
-		return fmt.Sprintf("status_%d", s)
-	}
-}
-
-func toUserView(u vwadmin.User) userView {
-	v := userView{ID: u.ID, Email: u.Email, Name: u.Name, Status: userStatus(u), TwoFactor: u.TwoFactor, Created: u.CreatedAt}
-	if v.Created == "" {
-		v.Created = u.CreationDate
-	}
+	v.Created = s.panelTime(created)
 	if u.LastActive != nil {
-		v.LastActive = *u.LastActive
+		v.LastActive = s.panelTime(*u.LastActive)
 	}
 	if v.Name == v.Email {
 		v.Name = ""
 	}
 	for _, m := range u.Organizations {
-		v.Organizations = append(v.Organizations, serverMembershipView{ID: m.ID, Name: m.Name, Role: memberRole(m.Type), Status: membershipStatus(m.Status)})
+		v.Organizations = append(v.Organizations, serverMembershipView{ID: m.ID, Name: m.Name, Role: string(vault.RoleOf(m.Type))})
 	}
 	return v
 }
 
+// panelTime shows a panel timestamp in the configured zone; text the panel
+// wrote in an unknown form is passed on unchanged rather than dropped.
+func (s *server) panelTime(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if t, ok := vwadmin.ParseTime(raw); ok {
+		return formatTime(t, s.Config.Location)
+	}
+	return raw
+}
+
 // serverOrganization is an organization as the account list shows it: the
-// panel has no organization list of its own that a program can read.
+// panel has no organization list a program can read, and it lists confirmed
+// memberships only. An organization without a confirmed member is not here.
 type serverOrganization struct {
 	ID      string
 	Name    string
@@ -111,7 +99,7 @@ func organizationsOf(users []vwadmin.User) []serverOrganization {
 				byID[m.ID] = o
 			}
 			o.Members = append(o.Members, u.Email)
-			if bitwarden.MemberType(m.Type) == bitwarden.MemberOwner && bitwarden.MemberStatus(m.Status) == bitwarden.MemberConfirmed {
+			if m.Type == bitwarden.MemberOwner {
 				o.Owners = append(o.Owners, u.Email)
 			}
 		}
@@ -138,25 +126,28 @@ func (c *call) requireServer(write bool) error {
 	return nil
 }
 
-// findUser resolves an account by email or id.
-func (s *server) findUser(ctx context.Context, ref string) (vwadmin.User, error) {
+// findUser resolves an account by email or id within the account list, which
+// is also the only answer of the panel that carries the last activity.
+func findUser(users []vwadmin.User, ref string) (vwadmin.User, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return vwadmin.User{}, fmt.Errorf("%w: user is required", vault.ErrInvalid)
 	}
-	var (
-		u   vwadmin.User
-		err error
-	)
-	if strings.Contains(ref, "@") {
-		u, err = s.Admin.UserByEmail(ctx, ref)
-	} else {
-		u, err = s.Admin.User(ctx, ref)
+	for _, u := range users {
+		if u.ID == ref || strings.EqualFold(u.Email, ref) {
+			return u, nil
+		}
 	}
-	if errors.Is(err, vwadmin.ErrNotFound) {
-		return vwadmin.User{}, fmt.Errorf("%w: user %q", vault.ErrNotFound, ref)
+	return vwadmin.User{}, fmt.Errorf("%w: user %q", vault.ErrNotFound, ref)
+}
+
+func (s *server) user(ctx context.Context, ref string) (vwadmin.User, []vwadmin.User, error) {
+	users, err := s.Admin.Users(ctx)
+	if err != nil {
+		return vwadmin.User{}, nil, err
 	}
-	return u, err
+	u, err := findUser(users, ref)
+	return u, users, err
 }
 
 func (s *server) registerServerRead(srv *mcp.Server) {
@@ -166,9 +157,9 @@ func (s *server) registerServerRead(srv *mcp.Server) {
 		Client               string   `json:"client" jsonschema:"who you are to this instance"`
 		ClientReadOnly       bool     `json:"client_read_only,omitempty"`
 		Server               string   `json:"server" jsonschema:"the server this instance administers"`
-		ServerVersion        string   `json:"server_version,omitempty" jsonschema:"the server's name and the Bitwarden API version it implements"`
+		ServerVersion        string   `json:"server_version,omitempty" jsonschema:"the server's name and release, and the Bitwarden API version it implements"`
 		Users                int      `json:"users"`
-		Organizations        int      `json:"organizations"`
+		Organizations        int      `json:"organizations" jsonschema:"organizations with at least one confirmed member"`
 		AllowWrite           bool     `json:"allow_write"`
 		AllowPermanentDelete bool     `json:"allow_permanent_delete" jsonschema:"whether delete_user and delete_organization exist on this instance"`
 		InviteDomains        []string `json:"invite_domains,omitempty"`
@@ -196,8 +187,13 @@ func (s *server) registerServerRead(srv *mcp.Server) {
 			InviteDomains: cfg.Caps.InviteDomains, Version: s.Version,
 			UptimeSeconds: int(s.Clock().Sub(s.StartedAt).Seconds()), Tools: s.registered,
 		}
+		// The version is a courtesy; a server that does not describe itself is
+		// still administered.
 		if v, err := s.Admin.Version(ctx); err == nil {
-			out.ServerVersion = strings.TrimSpace(v.Server.Name + ", API " + v.API)
+			out.ServerVersion = strings.TrimSpace(v.Name + " " + v.Release)
+			if v.API != "" {
+				out.ServerVersion += " (API " + v.API + ")"
+			}
 		}
 		return out, nil
 	})
@@ -205,14 +201,14 @@ func (s *server) registerServerRead(srv *mcp.Server) {
 	type listUsersInput struct {
 		Query        string `json:"query,omitempty" jsonschema:"optional text the email or name contains"`
 		Status       string `json:"status,omitempty" jsonschema:"optional: active, invited or disabled"`
-		Organization string `json:"organization,omitempty" jsonschema:"optional organization name or id the account belongs to"`
+		Organization string `json:"organization,omitempty" jsonschema:"optional organization name or id the account is a confirmed member of"`
 	}
 	type listUsersOutput struct {
 		Users []userView `json:"users"`
 	}
 	addTool(s, srv, &mcp.Tool{
 		Name:        "list_users",
-		Description: "List the accounts of the server with their status, two-step login, last activity and organizations.",
+		Description: "List the accounts of the server with their status, two-step login, last activity and confirmed organizations.",
 	}, func(ctx context.Context, c *call, in listUsersInput) (listUsersOutput, error) {
 		if err := c.requireServer(false); err != nil {
 			return listUsersOutput{}, err
@@ -229,11 +225,10 @@ func (s *server) registerServerRead(srv *mcp.Server) {
 		query := strings.ToLower(strings.TrimSpace(in.Query))
 		out := listUsersOutput{Users: []userView{}}
 		for _, u := range users {
-			v := toUserView(u)
 			if query != "" && !strings.Contains(strings.ToLower(u.Email), query) && !strings.Contains(strings.ToLower(u.Name), query) {
 				continue
 			}
-			if in.Status != "" && v.Status != in.Status {
+			if in.Status != "" && userStatus(u) != in.Status {
 				continue
 			}
 			if in.Organization != "" && !slices.ContainsFunc(u.Organizations, func(m vwadmin.Membership) bool {
@@ -241,7 +236,7 @@ func (s *server) registerServerRead(srv *mcp.Server) {
 			}) {
 				continue
 			}
-			out.Users = append(out.Users, v)
+			out.Users = append(out.Users, s.toUserView(u))
 		}
 		sort.Slice(out.Users, func(i, j int) bool { return out.Users[i].Email < out.Users[j].Email })
 		return out, nil
@@ -252,30 +247,31 @@ func (s *server) registerServerRead(srv *mcp.Server) {
 	}
 	addTool(s, srv, &mcp.Tool{
 		Name:        "get_user",
-		Description: "Show one account of the server: status, two-step login, last activity and organizations with roles.",
+		Description: "Show one account of the server: status, two-step login, last activity and confirmed organizations with roles.",
 	}, func(ctx context.Context, c *call, in userInput) (userView, error) {
 		if err := c.requireServer(false); err != nil {
 			return userView{}, err
 		}
-		u, err := s.findUser(ctx, in.User)
+		u, _, err := s.user(ctx, in.User)
 		if err != nil {
 			return userView{}, err
 		}
-		return toUserView(u), nil
+		return s.toUserView(u), nil
 	})
 
 	type serverOrgView struct {
 		ID      string   `json:"id"`
 		Name    string   `json:"name"`
-		Members int      `json:"members"`
+		Members int      `json:"members" jsonschema:"confirmed members"`
 		Owners  []string `json:"owners" jsonschema:"confirmed owners"`
 	}
 	type serverOrgsOutput struct {
 		Organizations []serverOrgView `json:"organizations"`
 	}
 	addTool(s, srv, &mcp.Tool{
-		Name:        "list_organizations",
-		Description: "List every organization of the server with its member count and confirmed owners.",
+		Name: "list_organizations",
+		Description: "List the organizations of the server with their confirmed member count and owners. The admin " +
+			"panel reports confirmed memberships only, so an organization without a confirmed member is not listed.",
 	}, func(ctx context.Context, c *call, _ struct{}) (serverOrgsOutput, error) {
 		if err := c.requireServer(false); err != nil {
 			return serverOrgsOutput{}, err
@@ -323,18 +319,22 @@ func (s *server) registerServerWrite(srv *mcp.Server) {
 		if err := s.checkInviteDomain(email); err != nil {
 			return userOutput{}, err
 		}
-		u, err := s.Admin.Invite(ctx, email)
-		if err != nil {
+		if err := s.Admin.Invite(ctx, email); err != nil {
 			return userOutput{}, err
 		}
 		c.mutated("invite_user")
 		c.note(slog.String("user", email))
-		return userOutput{User: toUserView(u), Status: "invited", Note: "the person registers with this address in the web vault"}, nil
+		out := userOutput{User: userView{Email: email, Status: "invited"}, Status: "invited", Note: "the person registers with this address in the web vault"}
+		// The invitation stands; reading the account back only fills in its id.
+		if u, _, err := s.user(ctx, email); err == nil {
+			out.User = s.toUserView(u)
+		}
+		return out, nil
 	})
 
 	type changeInput struct {
 		User   string `json:"user" jsonschema:"the account: its email or id"`
-		Action string `json:"action" jsonschema:"disable (blocks login and syncing, keeps everything), enable (lifts it), deauthorize (ends every session and device login) or resend_invite (mails the invitation again)"`
+		Action string `json:"action" jsonschema:"disable (blocks login and syncing, keeps everything), enable (lifts it), deauthorize (ends every session and device login) or resend_invite (mails the invitation again; a server without mail sends nothing)"`
 	}
 	actions := map[string]vwadmin.UserAction{
 		"disable": vwadmin.ActionDisable, "enable": vwadmin.ActionEnable,
@@ -351,7 +351,7 @@ func (s *server) registerServerWrite(srv *mcp.Server) {
 		if !ok {
 			return userOutput{}, fmt.Errorf("%w: action %q: want disable, enable, deauthorize or resend_invite", vault.ErrInvalid, in.Action)
 		}
-		u, err := s.findUser(ctx, in.User)
+		u, _, err := s.user(ctx, in.User)
 		if err != nil {
 			return userOutput{}, err
 		}
@@ -363,53 +363,61 @@ func (s *server) registerServerWrite(srv *mcp.Server) {
 		}
 		c.mutated(in.Action + "_user")
 		c.note(slog.String("user", u.Email))
-		if after, err := s.Admin.User(ctx, u.ID); err == nil {
+		// The change is made; reading the account back only refreshes the view.
+		if after, _, err := s.user(ctx, u.ID); err == nil {
 			u = after
 		}
-		return userOutput{User: toUserView(u), Status: in.Action}, nil
+		return userOutput{User: s.toUserView(u), Status: in.Action}, nil
 	})
 }
 
 // registerServerDelete adds the tools that destroy accounts and
-// organizations; they exist only where permanent deletion is enabled.
+// organizations; they exist only where permanent deletion is enabled. Each
+// acts in two calls: the first shows the target and returns a code, the second
+// must bring that code back. The code is issued by this instance and never
+// derivable from the target, so an agent cannot skip the look.
 func (s *server) registerServerDelete(srv *mcp.Server) {
 	type deleteUserInput struct {
 		User    string `json:"user" jsonschema:"the account: its email or id"`
-		Confirm string `json:"confirm,omitempty" jsonschema:"the account's email, exactly; omit it to see what would be deleted"`
+		Confirm string `json:"confirm,omitempty" jsonschema:"the code the first call returned; omit it to see what would be deleted"`
 	}
 	type deleteUserOutput struct {
 		User    userView `json:"user"`
 		Deleted bool     `json:"deleted"`
-		Next    string   `json:"next,omitempty"`
+		Confirm string   `json:"confirm,omitempty" jsonschema:"pass this back as confirm to delete; valid for five minutes, once"`
 	}
 	addTool(s, srv, &mcp.Tool{
 		Name: "delete_user",
-		Description: "Delete an account with its personal vault, in two steps: without confirm it shows the account; " +
-			"with confirm set to its email it deletes it. The only owner of an organization is refused.",
+		Description: "Delete an account with its personal vault, in two calls: the first shows the account and returns " +
+			"a confirmation code, the second deletes it when given that code. The last confirmed owner or member of " +
+			"an organization is refused.",
 	}, func(ctx context.Context, c *call, in deleteUserInput) (deleteUserOutput, error) {
 		if err := c.requireServer(true); err != nil {
 			return deleteUserOutput{}, err
 		}
-		u, err := s.findUser(ctx, in.User)
-		if err != nil {
-			return deleteUserOutput{}, err
-		}
-		users, err := s.Admin.Users(ctx)
+		u, users, err := s.user(ctx, in.User)
 		if err != nil {
 			return deleteUserOutput{}, err
 		}
 		for _, o := range organizationsOf(users) {
-			if len(o.Owners) == 1 && o.Owners[0] == u.Email {
-				return deleteUserOutput{}, fmt.Errorf("%w: %s is the only owner of %q; hand the organization over or delete it first", vault.ErrInvalid, u.Email, o.Name)
+			if slices.Equal(o.Owners, []string{u.Email}) {
+				return deleteUserOutput{}, fmt.Errorf("%w: %s is the only confirmed owner of %q; hand the organization over or delete it first", vault.ErrInvalid, u.Email, o.Name)
+			}
+			// The organization would lose its last confirmed member and with it
+			// the only way this instance can see or delete it.
+			if slices.Equal(o.Members, []string{u.Email}) {
+				return deleteUserOutput{}, fmt.Errorf("%w: %s is the only confirmed member of %q; delete the organization first", vault.ErrInvalid, u.Email, o.Name)
 			}
 		}
-		out := deleteUserOutput{User: toUserView(u)}
+		out := deleteUserOutput{User: s.toUserView(u)}
 		if strings.TrimSpace(in.Confirm) == "" {
-			out.Next = "call delete_user again with confirm set to " + u.Email
+			if out.Confirm, err = s.confirms.issue("delete_user", u.ID, c.principal.Name); err != nil {
+				return deleteUserOutput{}, err
+			}
 			return out, nil
 		}
-		if !strings.EqualFold(strings.TrimSpace(in.Confirm), u.Email) {
-			return deleteUserOutput{}, fmt.Errorf("%w: confirm does not match the account's email", vault.ErrInvalid)
+		if !s.confirms.take(in.Confirm, "delete_user", u.ID, c.principal.Name) {
+			return deleteUserOutput{}, fmt.Errorf("%w: the confirmation code is not valid for this account; call delete_user without confirm for a new one", vault.ErrInvalid)
 		}
 		if err := s.Admin.ChangeUser(ctx, u.ID, vwadmin.ActionDelete); err != nil {
 			return deleteUserOutput{}, err
@@ -421,57 +429,123 @@ func (s *server) registerServerDelete(srv *mcp.Server) {
 	})
 
 	type deleteOrgInput struct {
-		Organization string `json:"organization" jsonschema:"organization name or id"`
-		Confirm      string `json:"confirm,omitempty" jsonschema:"the organization's name, exactly; omit it to see what would be deleted"`
+		Organization string `json:"organization" jsonschema:"organization name or id; an organization without confirmed members is reached by id only"`
+		Confirm      string `json:"confirm,omitempty" jsonschema:"the code the first call returned; omit it to see what would be deleted"`
 	}
 	type deleteOrgOutput struct {
 		ID      string   `json:"id"`
-		Name    string   `json:"name"`
-		Members []string `json:"members"`
+		Name    string   `json:"name,omitempty"`
+		Members []string `json:"members" jsonschema:"confirmed members"`
 		Deleted bool     `json:"deleted"`
-		Next    string   `json:"next,omitempty"`
+		Note    string   `json:"note,omitempty"`
+		Confirm string   `json:"confirm,omitempty" jsonschema:"pass this back as confirm to delete; valid for five minutes, once"`
 	}
 	addTool(s, srv, &mcp.Tool{
 		Name: "delete_organization",
-		Description: "Delete an organization with every collection and item in it, in two steps: without confirm it " +
-			"shows the organization and its members; with confirm set to its exact name it deletes it.",
+		Description: "Delete an organization with every collection and item in it, in two calls: the first shows the " +
+			"organization and its confirmed members and returns a confirmation code, the second deletes it when given that code.",
 	}, func(ctx context.Context, c *call, in deleteOrgInput) (deleteOrgOutput, error) {
 		if err := c.requireServer(true); err != nil {
 			return deleteOrgOutput{}, err
+		}
+		ref := strings.TrimSpace(in.Organization)
+		if ref == "" {
+			return deleteOrgOutput{}, fmt.Errorf("%w: organization is required", vault.ErrInvalid)
 		}
 		users, err := s.Admin.Users(ctx)
 		if err != nil {
 			return deleteOrgOutput{}, err
 		}
+		var out deleteOrgOutput
 		var matches []serverOrganization
 		for _, o := range organizationsOf(users) {
-			if matchesOrg(o.ID, o.Name, in.Organization) {
+			if o.ID == ref {
+				matches = []serverOrganization{o}
+				break
+			}
+			if strings.EqualFold(o.Name, ref) {
 				matches = append(matches, o)
 			}
 		}
 		switch {
-		case strings.TrimSpace(in.Organization) == "":
-			return deleteOrgOutput{}, fmt.Errorf("%w: organization is required", vault.ErrInvalid)
-		case len(matches) == 0:
-			return deleteOrgOutput{}, fmt.Errorf("%w: organization %q", vault.ErrNotFound, in.Organization)
+		case len(matches) == 1:
+			o := matches[0]
+			out = deleteOrgOutput{ID: o.ID, Name: o.Name, Members: o.Members}
 		case len(matches) > 1:
-			return deleteOrgOutput{}, fmt.Errorf("%w: organization %q matches %d organizations; pass the id", vault.ErrAmbiguous, in.Organization, len(matches))
+			return deleteOrgOutput{}, fmt.Errorf("%w: organization %q matches %d organizations; pass the id", vault.ErrAmbiguous, ref, len(matches))
+		case isUUID(ref):
+			out = deleteOrgOutput{ID: strings.ToLower(ref), Members: []string{}, Note: "no confirmed member, so the panel does not describe it; it is deleted by id"}
+		default:
+			return deleteOrgOutput{}, fmt.Errorf("%w: organization %q; one without confirmed members is reached by id only", vault.ErrNotFound, ref)
 		}
-		o := matches[0]
-		out := deleteOrgOutput{ID: o.ID, Name: o.Name, Members: o.Members}
 		if strings.TrimSpace(in.Confirm) == "" {
-			out.Next = fmt.Sprintf("call delete_organization again with confirm set to %q", o.Name)
+			if out.Confirm, err = s.confirms.issue("delete_organization", out.ID, c.principal.Name); err != nil {
+				return deleteOrgOutput{}, err
+			}
 			return out, nil
 		}
-		if in.Confirm != o.Name {
-			return deleteOrgOutput{}, fmt.Errorf("%w: confirm does not match the organization's name", vault.ErrInvalid)
+		if !s.confirms.take(in.Confirm, "delete_organization", out.ID, c.principal.Name) {
+			return deleteOrgOutput{}, fmt.Errorf("%w: the confirmation code is not valid for this organization; call delete_organization without confirm for a new one", vault.ErrInvalid)
 		}
-		if err := s.Admin.DeleteOrganization(ctx, o.ID); err != nil {
+		if err := s.Admin.DeleteOrganization(ctx, out.ID); err != nil {
 			return deleteOrgOutput{}, err
 		}
 		c.mutated("delete_organization")
-		c.note(slog.String("organization", o.Name))
+		c.note(slog.String("organization", out.Name), slog.String("organization_id", out.ID))
 		out.Deleted = true
 		return out, nil
 	})
+}
+
+var uuidShape = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func isUUID(s string) bool { return uuidShape.MatchString(s) }
+
+// confirmTTL is how long a confirmation code of a deletion stays valid.
+const confirmTTL = 5 * time.Minute
+
+// confirmBook holds the codes the first call of a deletion issues. A code is
+// bound to the tool, the target and the client, and is taken once.
+type confirmBook struct {
+	mu      sync.Mutex
+	now     func() time.Time
+	pending map[string]pendingConfirm
+}
+
+type pendingConfirm struct {
+	tool, target, client string
+	expires              time.Time
+}
+
+func newConfirmBook(now func() time.Time) *confirmBook {
+	return &confirmBook{now: now, pending: map[string]pendingConfirm{}}
+}
+
+func (b *confirmBook) issue(tool, target, client string) (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	code := hex.EncodeToString(raw)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	for k, p := range b.pending {
+		if !now.Before(p.expires) {
+			delete(b.pending, k)
+		}
+	}
+	b.pending[code] = pendingConfirm{tool: tool, target: target, client: client, expires: now.Add(confirmTTL)}
+	return code, nil
+}
+
+func (b *confirmBook) take(code, tool, target, client string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p, ok := b.pending[strings.TrimSpace(code)]
+	if !ok || p.tool != tool || p.target != target || p.client != client || !b.now().Before(p.expires) {
+		return false
+	}
+	delete(b.pending, strings.TrimSpace(code))
+	return true
 }

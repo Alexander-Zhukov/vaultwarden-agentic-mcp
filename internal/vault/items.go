@@ -57,12 +57,23 @@ func (v *Vault) mutate(ctx context.Context, fn func(snap *Snapshot) error) error
 // resolveWritable resolves collection references and checks that the account
 // may write to every one of them and that they share one organization.
 func resolveWritable(snap *Snapshot, refs []string) ([]Collection, error) {
+	return resolveWritableIn(snap, "", refs)
+}
+
+// resolveWritableIn resolves writable collections within one organization; an
+// empty orgID accepts any, as long as all of them share one.
+func resolveWritableIn(snap *Snapshot, orgID string, refs []string) ([]Collection, error) {
 	if len(refs) == 0 {
 		return nil, fmt.Errorf("%w: at least one collection is required", ErrInvalid)
 	}
 	var out []Collection
 	for _, ref := range refs {
-		c, err := snap.Collection(ref)
+		c, err := snap.CollectionIn(orgID, ref)
+		if errors.Is(err, ErrNotFound) && orgID != "" {
+			if _, elsewhere := snap.Collection(ref); elsewhere == nil {
+				return nil, fmt.Errorf("%w: collection %q is in another organization; an item cannot change organization", ErrInvalid, ref)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -302,12 +313,12 @@ func (v *Vault) SetCollections(ctx context.Context, ref ItemRef, collections []s
 		if err != nil {
 			return err
 		}
-		cols, err := resolveWritable(snap, collections)
+		if it.OrganizationID == "" {
+			return fmt.Errorf("%w: %q is in the personal vault, not in an organization", ErrInvalid, it.Name)
+		}
+		cols, err := resolveWritableIn(snap, it.OrganizationID, collections)
 		if err != nil {
 			return err
-		}
-		if cols[0].OrganizationID != it.OrganizationID {
-			return fmt.Errorf("%w: an item cannot change organization", ErrInvalid)
 		}
 		target = *it
 		target.CollectionIDs = ids(cols)

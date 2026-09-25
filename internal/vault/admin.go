@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -37,6 +38,12 @@ func ParseRole(s string) (Role, error) {
 	}
 	return r, nil
 }
+
+// RoleOf names a member type as tools spell it.
+func RoleOf(t bitwarden.MemberType) Role { return roleName(t) }
+
+// StatusOf names a membership status as tools spell it.
+func StatusOf(s bitwarden.MemberStatus) string { return statusName(s) }
 
 func roleName(t bitwarden.MemberType) Role {
 	// Vaultwarden reports managers as the custom type.
@@ -131,8 +138,8 @@ type ManagedOrganization struct {
 }
 
 // Organizations lists the account's memberships. An organization is managed
-// when the account owns or administers it and it is within allowed (names or
-// ids; empty allows every one).
+// when the account owns or administers it and it is within allowed (see
+// withinAllowed; empty allows every one).
 func (v *Vault) Organizations(ctx context.Context, allowed []string) ([]ManagedOrganization, error) {
 	snap, err := v.Snapshot(ctx)
 	if err != nil {
@@ -142,7 +149,7 @@ func (v *Vault) Organizations(ctx context.Context, allowed []string) ([]ManagedO
 	for _, o := range snap.Organizations {
 		out = append(out, ManagedOrganization{
 			ID: o.ID, Name: o.Name, Role: roleName(o.Role),
-			Managed: administers(o) && withinAllowed(o, allowed),
+			Managed: administers(o) && withinAllowed(o, allowed, snap.Organizations),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -153,10 +160,34 @@ func administers(o Organization) bool {
 	return o.Role == bitwarden.MemberOwner || o.Role == bitwarden.MemberAdmin
 }
 
-func withinAllowed(o Organization, allowed []string) bool {
-	return len(allowed) == 0 || slices.ContainsFunc(allowed, func(ref string) bool {
-		return o.ID == ref || strings.EqualFold(o.Name, ref)
-	})
+var idShape = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// withinAllowed matches the allow-list exactly: an entry is an organization id,
+// or the exact name of one organization. Anyone on the server can create an
+// organization and invite this account, so a looser match — ignoring case, or
+// a name shared by two organizations — would let a newcomer into the list.
+func withinAllowed(o Organization, allowed []string, all []Organization) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, ref := range allowed {
+		if o.ID == ref {
+			return true
+		}
+		// An id-shaped entry names an id, never a name that copies one.
+		if o.Name == ref && !idShape.MatchString(ref) {
+			named := 0
+			for _, other := range all {
+				if other.Name == ref {
+					named++
+				}
+			}
+			if named == 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Admin returns the management view of one organization. orgRef names it by
@@ -169,9 +200,15 @@ func (v *Vault) Admin(ctx context.Context, orgRef string, allowed []string) (*Ad
 		return nil, err
 	}
 	if orgRef != "" {
+		// An id wins over names: a name can be chosen by anyone who creates an
+		// organization, an id cannot.
 		var matches []Organization
 		for _, o := range snap.Organizations {
-			if o.ID == orgRef || strings.EqualFold(o.Name, orgRef) {
+			if o.ID == orgRef {
+				matches = []Organization{o}
+				break
+			}
+			if strings.EqualFold(o.Name, orgRef) {
 				matches = append(matches, o)
 			}
 		}
@@ -183,8 +220,8 @@ func (v *Vault) Admin(ctx context.Context, orgRef string, allowed []string) (*Ad
 			return nil, fmt.Errorf("%w: organization %q matches %d organizations; pass the id", ErrAmbiguous, orgRef, len(matches))
 		}
 		o := matches[0]
-		if !withinAllowed(o, allowed) {
-			return nil, fmt.Errorf("%w: organization %q is not managed by this instance (VWMCP_ORGANIZATION)", ErrReadOnly, o.Name)
+		if !withinAllowed(o, allowed, snap.Organizations) {
+			return nil, fmt.Errorf("%w: organization %q is not managed by this instance", ErrReadOnly, o.Name)
 		}
 		if !administers(o) {
 			return nil, fmt.Errorf("%w: the account is %s of %q, not owner or admin", ErrReadOnly, roleName(o.Role), o.Name)
@@ -193,13 +230,13 @@ func (v *Vault) Admin(ctx context.Context, orgRef string, allowed []string) (*Ad
 	}
 	var managed []Organization
 	for _, o := range snap.Organizations {
-		if administers(o) && withinAllowed(o, allowed) {
+		if administers(o) && withinAllowed(o, allowed, snap.Organizations) {
 			managed = append(managed, o)
 		}
 	}
 	switch len(managed) {
 	case 0:
-		return nil, fmt.Errorf("%w: no organization this instance manages: the account owns or administers none within VWMCP_ORGANIZATION", ErrNotFound)
+		return nil, fmt.Errorf("%w: this instance manages no organization: the account owns or administers none of those it may manage", ErrNotFound)
 	case 1:
 		return &Admin{v: v, orgID: managed[0].ID, orgName: managed[0].Name}, nil
 	default:
@@ -283,12 +320,9 @@ func findMember(members []bitwarden.Member, ref string) (bitwarden.Member, error
 func (a *Admin) grants(snap *Snapshot, in []Grant) ([]bitwarden.CollectionAccess, error) {
 	out := make([]bitwarden.CollectionAccess, 0, len(in))
 	for _, g := range in {
-		c, err := snap.Collection(g.Collection)
+		c, err := snap.CollectionIn(a.orgID, g.Collection)
 		if err != nil {
 			return nil, err
-		}
-		if c.OrganizationID != a.orgID {
-			return nil, fmt.Errorf("%w: collection %q is in another organization", ErrInvalid, c.Name)
 		}
 		out = append(out, bitwarden.CollectionAccess{ID: c.ID, ReadOnly: g.ReadOnly, HidePasswords: g.HidePasswords, Manage: g.Manage})
 	}
@@ -425,6 +459,14 @@ func (a *Admin) UpdateMember(ctx context.Context, memberRef string, role *Role, 
 	}
 	req := memberRequest(typ, access, m.Groups)
 	req.AccessAll = m.AccessAll
+	// A manager of every collection is the custom type with three
+	// permissions; Vaultwarden derives the access from them and ignores
+	// accessAll. Sent back as a plain manager, the member would silently lose
+	// every collection.
+	if m.Type == bitwarden.MemberCustom && m.AccessAll && (role == nil || *role == RoleManager) {
+		req.Type = bitwarden.MemberCustom
+		req.Permissions = map[string]bool{"editAnyCollection": true, "deleteAnyCollection": true, "createNewCollections": true}
+	}
 	if err := a.v.retry(func() error { return a.v.client.UpdateMember(ctx, a.orgID, m.ID, req) }); err != nil {
 		return fmt.Errorf("update member: %w", err)
 	}

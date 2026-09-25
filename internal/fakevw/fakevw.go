@@ -46,6 +46,8 @@ type member struct {
 	role        bitwarden.MemberType
 	key         string
 	collections []bitwarden.CollectionAccess
+	// accessAll is a manager of every collection.
+	accessAll bool
 }
 
 type organization struct {
@@ -746,7 +748,7 @@ func (s *Server) members(w http.ResponseWriter, r *http.Request, a *Account) {
 		if role == bitwarden.MemberManager {
 			role = bitwarden.MemberCustom
 		}
-		out = append(out, bitwarden.Member{ID: m.id, UserID: m.userID, Email: m.email, Status: m.status, Type: role, Collections: slices.Clone(m.collections)})
+		out = append(out, bitwarden.Member{ID: m.id, UserID: m.userID, Email: m.email, Status: m.status, Type: role, AccessAll: m.accessAll, Collections: slices.Clone(m.collections)})
 	}
 	writeJSON(w, map[string]any{"data": out})
 }
@@ -801,7 +803,11 @@ func (s *Server) updateMember(w http.ResponseWriter, r *http.Request, a *Account
 	}
 	if m := s.findMember(w, org, r.PathValue("id")); m != nil {
 		role := body.Type
-		// ...and accepts the custom type back as manager.
+		// ...and accepts the custom type back as manager. Access to every
+		// collection follows from the type and the permissions alone; the
+		// accessAll of the body is ignored, as Vaultwarden does.
+		m.accessAll = role == bitwarden.MemberCustom && body.Permissions["editAnyCollection"] &&
+			body.Permissions["deleteAnyCollection"] && body.Permissions["createNewCollections"]
 		if role == bitwarden.MemberCustom {
 			role = bitwarden.MemberManager
 		}

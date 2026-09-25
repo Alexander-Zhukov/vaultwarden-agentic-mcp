@@ -116,6 +116,7 @@ func run() error {
 		admin, err = vwadmin.New(vwadmin.Config{
 			BaseURL: cfg.Vaultwarden.URL, Token: cfg.Vaultwarden.AdminToken, HTTP: httpClient,
 			MaxResponseBytes: cfg.Vaultwarden.MaxResponseBytes, UserAgent: agent,
+			BackoffMin: cfg.Tuning.LoginBackoffMin, BackoffMax: cfg.Tuning.LoginBackoffMax, Clock: clock,
 			Observe: metrics.ObserveServer, OnLogin: metrics.ObserveLogin,
 		})
 		if err != nil {
@@ -152,7 +153,7 @@ func run() error {
 
 	group, ctx := errgroup.WithContext(ctx)
 	if admin != nil {
-		group.Go(func() error { return keepChecked(ctx, admin, cfg.RefreshInterval, metrics, readiness, logger) })
+		group.Go(func() error { return keepChecked(ctx, admin, cfg.RefreshInterval, clock, metrics, readiness, logger) })
 	} else {
 		group.Go(func() error { return keepSynced(ctx, v, cfg.RefreshInterval, metrics, readiness, logger) })
 	}
@@ -283,7 +284,7 @@ func newVault(cfg *config.Config, httpClient *http.Client, agent string, metrics
 // keepChecked is keepSynced of the server mode: it reads the account list at
 // startup and on an interval, so readiness tells whether the admin token still
 // opens the panel.
-func keepChecked(ctx context.Context, admin *vwadmin.Client, every time.Duration, m *obs.Metrics, ready *obs.Readiness, logger *slog.Logger) error {
+func keepChecked(ctx context.Context, admin *vwadmin.Client, every time.Duration, clock func() time.Time, m *obs.Metrics, ready *obs.Readiness, logger *slog.Logger) error {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
@@ -291,7 +292,7 @@ func keepChecked(ctx context.Context, admin *vwadmin.Client, every time.Duration
 		switch {
 		case err == nil:
 			ready.Set(true)
-			m.LastSync.Set(float64(time.Now().Unix()))
+			m.LastSync.Set(float64(clock().Unix()))
 		case ctx.Err() != nil:
 			return nil
 		default:
