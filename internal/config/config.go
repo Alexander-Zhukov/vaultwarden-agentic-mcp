@@ -80,6 +80,9 @@ const (
 	ModeConsumer Mode = "consumer"
 	// ModeAdmin adds organization management: members, collections, events.
 	ModeAdmin Mode = "admin"
+	// ModeServer administers the server itself through its admin panel:
+	// accounts and organizations, with the admin token and no account.
+	ModeServer Mode = "server"
 )
 
 // Transport selects how MCP clients reach the server.
@@ -110,12 +113,14 @@ type Client struct {
 
 // Vaultwarden describes the server and the account.
 type Vaultwarden struct {
-	URL              string
-	WebURL           string
-	CAFile           string
-	ClientID         string
-	ClientSecret     Secret
-	Password         Secret
+	URL          string
+	WebURL       string
+	CAFile       string
+	ClientID     string
+	ClientSecret Secret
+	Password     Secret
+	// AdminToken is the server's ADMIN_TOKEN; only the server mode uses it.
+	AdminToken       Secret
 	DeviceName       string
 	Timeout          time.Duration
 	MaxResponseBytes int64
@@ -203,9 +208,11 @@ type Tuning struct {
 
 // Config is the validated configuration of one instance: one account.
 type Config struct {
-	Account         string
-	Mode            Mode
-	Organization    string
+	Account string
+	Mode    Mode
+	// Organizations bounds which organizations admin mode manages, by name
+	// or id; empty is every one the account owns or administers.
+	Organizations   []string
 	Transport       Transport
 	Listen          *Listen
 	Vaultwarden     Vaultwarden
@@ -243,19 +250,17 @@ func Load() (*Config, []string, error) { return LoadFrom(os.LookupEnv) }
 func LoadFrom(lookup func(string) (string, bool)) (*Config, []string, error) {
 	r := &envReader{lookup: lookup}
 	transport := Transport(strings.ToLower(r.stringOr("VWMCP_TRANSPORT", string(DefaultTransport))))
+	mode := Mode(strings.ToLower(r.stringOr("VWMCP_MODE", string(DefaultMode))))
 
 	cfg := &Config{
-		Account:      r.stringOr("VWMCP_ACCOUNT", DefaultAccount),
-		Mode:         Mode(strings.ToLower(r.stringOr("VWMCP_MODE", string(DefaultMode)))),
-		Organization: r.stringOr("VWMCP_ORGANIZATION", ""),
-		Transport:    transport,
-		Listen:       readListen(r, transport),
+		Account:       r.stringOr("VWMCP_ACCOUNT", DefaultAccount),
+		Mode:          mode,
+		Organizations: r.list("VWMCP_ORGANIZATION"),
+		Transport:     transport,
+		Listen:        readListen(r, transport),
 		Vaultwarden: Vaultwarden{
 			URL:              strings.TrimRight(r.required("VWMCP_SERVER_URL"), "/"),
 			CAFile:           r.stringOr("VWMCP_CA_FILE", ""),
-			ClientID:         r.required("VWMCP_CLIENT_ID"),
-			ClientSecret:     r.requiredSecret("VWMCP_CLIENT_SECRET"),
-			Password:         r.requiredSecret("VWMCP_MASTER_PASSWORD"),
 			DeviceName:       r.stringOr("VWMCP_DEVICE_NAME", DefaultDeviceName),
 			Timeout:          r.durationOr("VWMCP_SERVER_TIMEOUT", DefaultServerTimeout),
 			MaxResponseBytes: int64(r.intOr("VWMCP_MAX_RESPONSE_BYTES", DefaultMaxResponseBytes)),
@@ -267,7 +272,7 @@ func LoadFrom(lookup func(string) (string, bool)) (*Config, []string, error) {
 			AllowWrite:           r.flag("VWMCP_ALLOW_WRITE"),
 			AllowShare:           r.flag("VWMCP_ALLOW_SHARE"),
 			AllowAdminRoles:      r.flag("VWMCP_ALLOW_ADMIN_ROLES"),
-			InviteDomains:        r.listOr("VWMCP_INVITE_DOMAINS", nil),
+			InviteDomains:        r.list("VWMCP_INVITE_DOMAINS"),
 		},
 		Links: Links{
 			PublicURL: strings.TrimRight(r.stringOr("VWMCP_PUBLIC_URL", ""), "/"),
@@ -277,7 +282,7 @@ func LoadFrom(lookup func(string) (string, bool)) (*Config, []string, error) {
 		ShareTTL:    r.durationOr("VWMCP_SHARE_TTL", DefaultShareTTL),
 		MaxShareTTL: r.durationOr("VWMCP_MAX_SHARE_TTL", DefaultMaxShareTTL),
 		Checks: Checks{
-			NotesPrefixes: r.listOr("VWMCP_NOTES_PREFIXES", nil),
+			NotesPrefixes: r.list("VWMCP_NOTES_PREFIXES"),
 			ExpiryField:   r.stringOr("VWMCP_EXPIRY_FIELD", DefaultExpiryField),
 			ExpiryHorizon: r.durationOr("VWMCP_EXPIRY_HORIZON", DefaultExpiryHorizon),
 		},
@@ -299,6 +304,7 @@ func LoadFrom(lookup func(string) (string, bool)) (*Config, []string, error) {
 		LogLevel:   strings.ToLower(r.stringOr("VWMCP_LOG_LEVEL", DefaultLogLevel)),
 		Shutdown:   r.durationOr("VWMCP_SHUTDOWN_TIMEOUT", DefaultShutdown),
 	}
+	readCredentials(r, mode, &cfg.Vaultwarden)
 	cfg.Vaultwarden.WebURL = strings.TrimRight(r.stringOr("VWMCP_WEB_URL", cfg.Vaultwarden.URL), "/")
 	cfg.Links.Sources = readPrefixes(r, "VWMCP_LINK_SOURCES")
 	cfg.MetricsAddr = readMetricsAddr(r, transport)
@@ -319,6 +325,29 @@ func LoadFrom(lookup func(string) (string, bool)) (*Config, []string, error) {
 	return cfg, r.Defaulted(), nil
 }
 
+// readCredentials reads what the mode logs in with: an account's API key and
+// master password, or, in server mode, the admin token alone. A credential the
+// mode does not use is refused rather than ignored, so that a deployment never
+// believes an account is in play when it is not, or the reverse.
+func readCredentials(r *envReader, mode Mode, vw *Vaultwarden) {
+	account := []string{"VWMCP_CLIENT_ID", "VWMCP_CLIENT_SECRET", "VWMCP_MASTER_PASSWORD"}
+	if mode == ModeServer {
+		vw.AdminToken = r.requiredSecret("VWMCP_ADMIN_TOKEN")
+		for _, name := range account {
+			if _, ok := r.value(name); ok {
+				r.fail(name, "has no effect in server mode, which acts with the admin token alone; remove it")
+			}
+		}
+		return
+	}
+	vw.ClientID = r.required("VWMCP_CLIENT_ID")
+	vw.ClientSecret = r.requiredSecret("VWMCP_CLIENT_SECRET")
+	vw.Password = r.requiredSecret("VWMCP_MASTER_PASSWORD")
+	if _, ok := r.value("VWMCP_ADMIN_TOKEN"); ok {
+		r.fail("VWMCP_ADMIN_TOKEN", "only server mode uses the admin token; remove it")
+	}
+}
+
 // readAuth reads VWMCP_AUTH: "token" (default) or "none".
 func readAuth(r *envReader) bool {
 	switch v := strings.ToLower(r.stringOr("VWMCP_AUTH", "token")); v {
@@ -335,7 +364,7 @@ func readAuth(r *envReader) bool {
 // readPrefixes reads a comma-separated list of addresses or CIDR ranges.
 func readPrefixes(r *envReader, name string) []netip.Prefix {
 	var out []netip.Prefix
-	for _, raw := range r.listOr(name, nil) {
+	for _, raw := range r.list(name) {
 		if p, err := netip.ParsePrefix(raw); err == nil {
 			out = append(out, p.Masked())
 			continue
@@ -450,8 +479,10 @@ func readClients(r *envReader) []Client {
 func (c *Config) validate(r *envReader) {
 	switch c.Mode {
 	case ModeConsumer, ModeAdmin:
+	case ModeServer:
+		c.validateServerMode(r)
 	default:
-		r.fail("VWMCP_MODE", "must be consumer or admin")
+		r.fail("VWMCP_MODE", "must be consumer, admin or server")
 	}
 	switch c.Transport {
 	case TransportHTTP:
@@ -515,6 +546,29 @@ func (c *Config) validate(r *envReader) {
 	}
 }
 
+// validateServerMode refuses settings of the vault modes that mean nothing
+// without an account: they would read as protections or features that are not
+// there.
+func (c *Config) validateServerMode(r *envReader) {
+	unused := map[string]bool{
+		"VWMCP_PUBLIC_URL":        c.Links.Enabled(),
+		"VWMCP_ALLOW_REVEAL":      c.Caps.AllowReveal,
+		"VWMCP_ALLOW_SHARE":       c.Caps.AllowShare,
+		"VWMCP_ALLOW_ADMIN_ROLES": c.Caps.AllowAdminRoles,
+		"VWMCP_ORGANIZATION":      len(c.Organizations) > 0,
+	}
+	for name, set := range unused {
+		if set {
+			r.fail(name, "has no effect in server mode; remove it")
+		}
+	}
+	for _, cl := range c.Clients {
+		if len(cl.Collections) > 0 {
+			r.fail("VWMCP_CLIENTS", fmt.Sprintf("client %q: collections= has no effect in server mode, which sees no collections", cl.Name))
+		}
+	}
+}
+
 func checkURL(r *envReader, name, raw string, requireTLS bool) {
 	if raw == "" {
 		return
@@ -542,14 +596,21 @@ func (c *Config) Warnings() []string {
 	if c.Caps.AllowReveal {
 		out = append(out, "VWMCP_ALLOW_REVEAL=true: get_secret returns values into the model context")
 	}
+	if c.Mode == ModeServer {
+		out = append(out, "VWMCP_MODE=server: this instance holds the admin token and manages every account and organization of the server")
+	}
 	if c.Caps.AllowPermanentDelete {
-		out = append(out, "VWMCP_ALLOW_PERMANENT_DELETE=true: items can be destroyed without the trash")
+		if c.Mode == ModeServer {
+			out = append(out, "VWMCP_ALLOW_PERMANENT_DELETE=true: accounts and organizations can be deleted with everything in them")
+		} else {
+			out = append(out, "VWMCP_ALLOW_PERMANENT_DELETE=true: items can be destroyed without the trash")
+		}
 	}
 	if c.Caps.AllowShare && c.Caps.AllowWrite {
 		out = append(out, "VWMCP_ALLOW_SHARE=true: share_with_human hands values to whoever holds a Send link")
 	}
-	if c.Mode == ModeAdmin && len(c.Caps.InviteDomains) == 0 && c.Caps.AllowWrite {
-		out = append(out, "VWMCP_INVITE_DOMAINS is empty: admin mode may invite any address")
+	if c.Mode != ModeConsumer && len(c.Caps.InviteDomains) == 0 && c.Caps.AllowWrite {
+		out = append(out, "VWMCP_INVITE_DOMAINS is empty: this instance may invite any address")
 	}
 	if c.Mode == ModeAdmin && c.Caps.AllowAdminRoles {
 		out = append(out, "VWMCP_ALLOW_ADMIN_ROLES=true: admin mode may grant owner and admin")

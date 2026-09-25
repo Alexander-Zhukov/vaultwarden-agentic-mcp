@@ -34,6 +34,7 @@ import (
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/mcpserver"
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/obs"
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/vault"
+	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/vwadmin"
 )
 
 func main() {
@@ -106,29 +107,23 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	v, err := vault.New(vault.Config{
-		Server: bitwarden.Config{
-			BaseURL: cfg.Vaultwarden.URL, HTTP: httpClient, MaxResponseBytes: cfg.Vaultwarden.MaxResponseBytes,
-			Observe: metrics.ObserveServer, UserAgent: "vaultwarden-agentic-mcp/" + version,
-		},
-		Credentials: vault.Credentials{
-			ClientID:     cfg.Vaultwarden.ClientID,
-			ClientSecret: cfg.Vaultwarden.ClientSecret,
-			Password:     cfg.Vaultwarden.Password,
-		},
-		DeviceName:         cfg.Vaultwarden.DeviceName,
-		SyncTTL:            cfg.SyncTTL,
-		MaxAttachmentBytes: cfg.MaxAttachment,
-		Clock:              clock,
-		OnLogin:            metrics.ObserveLogin,
-		TokenMargin:        cfg.Tuning.TokenMargin,
-		BackoffMin:         cfg.Tuning.LoginBackoffMin,
-		BackoffMax:         cfg.Tuning.LoginBackoffMax,
-	})
-	if err != nil {
+	agent := "vaultwarden-agentic-mcp/" + version
+	var (
+		v     *vault.Vault
+		admin *vwadmin.Client
+	)
+	if cfg.Mode == config.ModeServer {
+		admin, err = vwadmin.New(vwadmin.Config{
+			BaseURL: cfg.Vaultwarden.URL, Token: cfg.Vaultwarden.AdminToken, HTTP: httpClient,
+			MaxResponseBytes: cfg.Vaultwarden.MaxResponseBytes, UserAgent: agent,
+			Observe: metrics.ObserveServer, OnLogin: metrics.ObserveLogin,
+		})
+		if err != nil {
+			return err
+		}
+	} else if v, err = newVault(cfg, httpClient, agent, metrics, clock); err != nil {
 		return err
 	}
-	metrics.Register(obs.NewExpiryCollector(expirySource(v, cfg), cfg.Checks.ExpiryHorizon, clock))
 
 	guard, err := access.New(access.Config{
 		Clients: cfg.Clients, MaxFailures: cfg.MaxAuthFailures, Window: cfg.AuthWindow,
@@ -142,7 +137,7 @@ func run() error {
 		local.Name = "stdio"
 	}
 	deps := mcpserver.Deps{
-		Config: cfg, Vault: v, Links: links.NewStore(clock, cfg.Tuning.MaxLinks), Metrics: metrics, Logger: logger,
+		Config: cfg, Vault: v, Admin: admin, Links: links.NewStore(clock, cfg.Tuning.MaxLinks), Metrics: metrics, Logger: logger,
 		Clock: clock, Local: local, StartedAt: clock(), Version: version,
 	}
 	server, tools, err := mcpserver.New(deps)
@@ -156,7 +151,11 @@ func run() error {
 	defer stop()
 
 	group, ctx := errgroup.WithContext(ctx)
-	group.Go(func() error { return keepSynced(ctx, v, cfg.RefreshInterval, metrics, readiness, logger) })
+	if admin != nil {
+		group.Go(func() error { return keepChecked(ctx, admin, cfg.RefreshInterval, metrics, readiness, logger) })
+	} else {
+		group.Go(func() error { return keepSynced(ctx, v, cfg.RefreshInterval, metrics, readiness, logger) })
+	}
 
 	httpServer := newHTTPServer(cfg, logger, server, guard, deps, metrics, readiness)
 	if cfg.MetricsAddr != "" {
@@ -244,6 +243,60 @@ func keepSynced(ctx context.Context, v *vault.Vault, every time.Duration, m *obs
 			// orchestrator and the alert rules that it cannot serve.
 			ready.Set(false)
 			logger.Warn("sync failed", slog.Any("error", err))
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		}
+	}
+}
+
+// newVault builds the account session of the consumer and admin modes.
+func newVault(cfg *config.Config, httpClient *http.Client, agent string, metrics *obs.Metrics, clock func() time.Time) (*vault.Vault, error) {
+	v, err := vault.New(vault.Config{
+		Server: bitwarden.Config{
+			BaseURL: cfg.Vaultwarden.URL, HTTP: httpClient, MaxResponseBytes: cfg.Vaultwarden.MaxResponseBytes,
+			Observe: metrics.ObserveServer, UserAgent: agent,
+		},
+		Credentials: vault.Credentials{
+			ClientID:     cfg.Vaultwarden.ClientID,
+			ClientSecret: cfg.Vaultwarden.ClientSecret,
+			Password:     cfg.Vaultwarden.Password,
+		},
+		DeviceName:         cfg.Vaultwarden.DeviceName,
+		SyncTTL:            cfg.SyncTTL,
+		MaxAttachmentBytes: cfg.MaxAttachment,
+		Clock:              clock,
+		OnLogin:            metrics.ObserveLogin,
+		TokenMargin:        cfg.Tuning.TokenMargin,
+		BackoffMin:         cfg.Tuning.LoginBackoffMin,
+		BackoffMax:         cfg.Tuning.LoginBackoffMax,
+	})
+	if err != nil {
+		return nil, err
+	}
+	metrics.Register(obs.NewExpiryCollector(expirySource(v, cfg), cfg.Checks.ExpiryHorizon, clock))
+	return v, nil
+}
+
+// keepChecked is keepSynced of the server mode: it reads the account list at
+// startup and on an interval, so readiness tells whether the admin token still
+// opens the panel.
+func keepChecked(ctx context.Context, admin *vwadmin.Client, every time.Duration, m *obs.Metrics, ready *obs.Readiness, logger *slog.Logger) error {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		_, err := admin.Users(ctx)
+		switch {
+		case err == nil:
+			ready.Set(true)
+			m.LastSync.Set(float64(time.Now().Unix()))
+		case ctx.Err() != nil:
+			return nil
+		default:
+			ready.Set(false)
+			logger.Warn("admin panel check failed", slog.Any("error", err))
 		}
 		select {
 		case <-ctx.Done():

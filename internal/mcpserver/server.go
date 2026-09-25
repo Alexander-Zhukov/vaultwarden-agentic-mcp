@@ -23,12 +23,16 @@ import (
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/links"
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/obs"
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/vault"
+	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/vwadmin"
 )
 
 // Deps are everything the MCP layer needs.
 type Deps struct {
-	Config  *config.Config
-	Vault   *vault.Vault
+	Config *config.Config
+	// Vault serves the consumer and admin modes.
+	Vault *vault.Vault
+	// Admin serves the server mode.
+	Admin   *vwadmin.Client
 	Links   *links.Store
 	Metrics *obs.Metrics
 	Logger  *slog.Logger
@@ -46,7 +50,11 @@ func (d Deps) validate() error {
 	if d.Config == nil || d.Config.Location == nil {
 		missing = append(missing, "Config")
 	}
-	if d.Vault == nil {
+	if d.Config != nil && d.Config.Mode == config.ModeServer {
+		if d.Admin == nil {
+			missing = append(missing, "Admin")
+		}
+	} else if d.Vault == nil {
 		missing = append(missing, "Vault")
 	}
 	if d.Links == nil {
@@ -87,6 +95,16 @@ func New(deps Deps) (*mcp.Server, []string, error) {
 		Instructions: instructions(deps.Config),
 	})
 	caps := deps.Config.Caps
+	if deps.Config.Mode == config.ModeServer {
+		s.registerServerRead(srv)
+		if caps.AllowWrite {
+			s.registerServerWrite(srv)
+			if caps.AllowPermanentDelete {
+				s.registerServerDelete(srv)
+			}
+		}
+		return srv, s.registered, nil
+	}
 	s.registerRead(srv)
 	s.registerValues(srv)
 	if caps.AllowWrite {
@@ -106,6 +124,14 @@ func New(deps Deps) (*mcp.Server, []string, error) {
 
 // instructions is the server-level guidance clients show the model once.
 func instructions(cfg *config.Config) string {
+	if cfg.Mode == config.ModeServer {
+		text := "Vaultwarden server administration: the accounts and organizations of the server, through its " +
+			"admin panel. No vault contents or secret values are reachable from this instance."
+		if !cfg.Caps.AllowWrite {
+			text += " This instance is read-only."
+		}
+		return text
+	}
 	var b strings.Builder
 	b.WriteString("Vaultwarden secrets for agents. Tools return names, metadata and fingerprints, never values, " +
 		"unless a tool says otherwise. Items are addressed by name, optionally within a collection; a name that " +

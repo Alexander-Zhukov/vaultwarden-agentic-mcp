@@ -116,39 +116,107 @@ type Grant struct {
 
 // Admin performs organization management for one organization.
 type Admin struct {
-	v     *Vault
-	orgID string
+	v       *Vault
+	orgID   string
+	orgName string
 }
 
-// Admin returns the management view of an organization the account owns or
-// administers.
-func (v *Vault) Admin(ctx context.Context, orgRef string) (*Admin, error) {
+// ManagedOrganization is a membership of the account and whether this
+// instance manages it.
+type ManagedOrganization struct {
+	ID      string
+	Name    string
+	Role    Role
+	Managed bool
+}
+
+// Organizations lists the account's memberships. An organization is managed
+// when the account owns or administers it and it is within allowed (names or
+// ids; empty allows every one).
+func (v *Vault) Organizations(ctx context.Context, allowed []string) ([]ManagedOrganization, error) {
 	snap, err := v.Snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var candidates []Organization
+	out := make([]ManagedOrganization, 0, len(snap.Organizations))
 	for _, o := range snap.Organizations {
-		if orgRef == "" || o.ID == orgRef || strings.EqualFold(o.Name, orgRef) {
-			candidates = append(candidates, o)
+		out = append(out, ManagedOrganization{
+			ID: o.ID, Name: o.Name, Role: roleName(o.Role),
+			Managed: administers(o) && withinAllowed(o, allowed),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func administers(o Organization) bool {
+	return o.Role == bitwarden.MemberOwner || o.Role == bitwarden.MemberAdmin
+}
+
+func withinAllowed(o Organization, allowed []string) bool {
+	return len(allowed) == 0 || slices.ContainsFunc(allowed, func(ref string) bool {
+		return o.ID == ref || strings.EqualFold(o.Name, ref)
+	})
+}
+
+// Admin returns the management view of one organization. orgRef names it by
+// name or id; empty picks the only managed organization. allowed bounds which
+// organizations may be managed at all (empty allows every one the account
+// owns or administers).
+func (v *Vault) Admin(ctx context.Context, orgRef string, allowed []string) (*Admin, error) {
+	snap, err := v.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if orgRef != "" {
+		var matches []Organization
+		for _, o := range snap.Organizations {
+			if o.ID == orgRef || strings.EqualFold(o.Name, orgRef) {
+				matches = append(matches, o)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			return nil, fmt.Errorf("%w: organization %q", ErrNotFound, orgRef)
+		case 1:
+		default:
+			return nil, fmt.Errorf("%w: organization %q matches %d organizations; pass the id", ErrAmbiguous, orgRef, len(matches))
+		}
+		o := matches[0]
+		if !withinAllowed(o, allowed) {
+			return nil, fmt.Errorf("%w: organization %q is not managed by this instance (VWMCP_ORGANIZATION)", ErrReadOnly, o.Name)
+		}
+		if !administers(o) {
+			return nil, fmt.Errorf("%w: the account is %s of %q, not owner or admin", ErrReadOnly, roleName(o.Role), o.Name)
+		}
+		return &Admin{v: v, orgID: o.ID, orgName: o.Name}, nil
+	}
+	var managed []Organization
+	for _, o := range snap.Organizations {
+		if administers(o) && withinAllowed(o, allowed) {
+			managed = append(managed, o)
 		}
 	}
-	switch len(candidates) {
+	switch len(managed) {
 	case 0:
-		return nil, fmt.Errorf("%w: organization %q", ErrNotFound, orgRef)
+		return nil, fmt.Errorf("%w: no organization this instance manages: the account owns or administers none within VWMCP_ORGANIZATION", ErrNotFound)
 	case 1:
+		return &Admin{v: v, orgID: managed[0].ID, orgName: managed[0].Name}, nil
 	default:
-		return nil, fmt.Errorf("%w: the account belongs to several organizations; configure which one to manage", ErrAmbiguous)
+		names := make([]string, len(managed))
+		for i, o := range managed {
+			names[i] = o.Name
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("%w: this instance manages several organizations (%s); pass organization", ErrAmbiguous, strings.Join(names, ", "))
 	}
-	o := candidates[0]
-	if o.Role != bitwarden.MemberOwner && o.Role != bitwarden.MemberAdmin {
-		return nil, fmt.Errorf("%w: the account is %s of %q, not owner or admin", ErrReadOnly, roleName(o.Role), o.Name)
-	}
-	return &Admin{v: v, orgID: o.ID}, nil
 }
 
 // OrganizationID returns the managed organization.
 func (a *Admin) OrganizationID() string { return a.orgID }
+
+// OrganizationName returns the managed organization's name.
+func (a *Admin) OrganizationName() string { return a.orgName }
 
 func (a *Admin) orgKey(ctx context.Context) (*Snapshot, keys.SymmetricKey, error) {
 	snap, err := a.v.Snapshot(ctx)

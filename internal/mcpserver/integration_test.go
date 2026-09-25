@@ -69,3 +69,92 @@ func TestLiveMCP(t *testing.T) {
 		t.Fatalf("share %v", share)
 	}
 }
+
+// TestLiveServerMode administers a real Vaultwarden through its admin panel.
+// The test server is shared with other live tests, so everything is looked up
+// by the names this test created.
+func TestLiveServerMode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	token := vwtest.AdminToken(t)
+	owner := vwtest.NewAccount(ctx, t, "srvowner")
+	other := vwtest.NewAccount(ctx, t, "srvother")
+	orgName := "Doomed-" + strings.TrimSuffix(strings.TrimPrefix(owner.Email, "srvowner-"), "@example.test")
+	owner.NewOrganization(ctx, t, orgName, "stuff")
+	h := start(t, setup{serverURL: vwtest.ServerURL(t), mode: config.ModeServer, adminToken: token, permanentDelete: true})
+	op := h.session(ctx, "op")
+
+	status := call(ctx, t, op, "get_status", nil, "")
+	if !strings.HasPrefix(status["server_version"].(string), "Vaultwarden, API 20") {
+		t.Fatalf("status %v", status)
+	}
+	got := call(ctx, t, op, "get_user", map[string]any{"user": owner.Email}, "")
+	orgs := got["organizations"].([]any)
+	if got["status"] != "active" || len(orgs) != 1 || orgs[0].(map[string]any)["role"] != "owner" || orgs[0].(map[string]any)["status"] != "confirmed" {
+		t.Fatalf("owner %v", got)
+	}
+	if byID := call(ctx, t, op, "get_user", map[string]any{"user": got["id"]}, ""); byID["email"] != owner.Email {
+		t.Fatalf("by id %v", byID)
+	}
+	if found := items(call(ctx, t, op, "list_users", map[string]any{"query": other.Email}, ""), "users"); len(found) != 1 {
+		t.Fatalf("list %v", found)
+	}
+
+	disabled := call(ctx, t, op, "change_user", map[string]any{"user": other.Email, "action": "disable"}, "")
+	if disabled["user"].(map[string]any)["status"] != "disabled" {
+		t.Fatalf("disable %v", disabled)
+	}
+	enabled := call(ctx, t, op, "change_user", map[string]any{"user": other.Email, "action": "enable"}, "")
+	if enabled["user"].(map[string]any)["status"] != "active" {
+		t.Fatalf("enable %v", enabled)
+	}
+	call(ctx, t, op, "change_user", map[string]any{"user": other.Email, "action": "deauthorize"}, "")
+
+	newcomer := "srvnew-" + strings.TrimPrefix(other.Email, "srvother-")
+	if inv := call(ctx, t, op, "invite_user", map[string]any{"email": newcomer}, ""); inv["user"].(map[string]any)["status"] != "invited" {
+		t.Fatalf("invite %v", inv)
+	}
+	call(ctx, t, op, "change_user", map[string]any{"user": newcomer, "action": "resend_invite"}, "")
+	call(ctx, t, op, "delete_user", map[string]any{"user": newcomer, "confirm": newcomer}, "")
+	call(ctx, t, op, "get_user", map[string]any{"user": newcomer}, "not found")
+
+	call(ctx, t, op, "delete_user", map[string]any{"user": owner.Email, "confirm": owner.Email}, "only owner")
+	call(ctx, t, op, "delete_organization", map[string]any{"organization": orgName, "confirm": orgName}, "")
+	for _, o := range items(call(ctx, t, op, "list_organizations", nil, ""), "organizations") {
+		if o.(map[string]any)["name"] == orgName {
+			t.Fatalf("%s survived its deletion", orgName)
+		}
+	}
+	call(ctx, t, op, "delete_user", map[string]any{"user": owner.Email, "confirm": owner.Email}, "")
+}
+
+// TestLiveSeveralOrganizations manages two organizations of one account and
+// checks with the official CLI that each collection landed in its own.
+func TestLiveSeveralOrganizations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	owner := vwtest.NewAccount(ctx, t, "orgs")
+	machine := owner.NewOrganization(ctx, t, "Machine", "infra")
+	lab := owner.NewOrganization(ctx, t, "Lab", "experiments")
+	h := start(t, setup{
+		serverURL: vwtest.ServerURL(t), mode: config.ModeAdmin,
+		creds: vault.Credentials{ClientID: owner.ClientID, ClientSecret: config.Secret(owner.ClientSecret), Password: config.Secret(owner.Password)},
+	})
+	op := h.session(ctx, "op")
+
+	if orgs := call(ctx, t, op, "list_organizations", nil, "")["organizations"].([]any); len(orgs) != 2 {
+		t.Fatalf("organizations %v", orgs)
+	}
+	call(ctx, t, op, "create_collection", map[string]any{"name": "shared"}, "pass organization")
+	call(ctx, t, op, "create_collection", map[string]any{"organization": "Lab", "name": "shared"}, "")
+
+	for _, c := range []struct {
+		id   string
+		want string
+	}{{lab.ID, "experiments,shared"}, {machine.ID, "infra"}} {
+		got := owner.BW(ctx, t, `bw list org-collections --organizationid `+c.id+` --session "$S" | node -e 'let d="";process.stdin.on("data",x=>d+=x).on("end",()=>console.log(JSON.parse(d).map(c=>c.name).sort().join(",")))'`)
+		if strings.TrimSpace(got) != c.want {
+			t.Fatalf("organization %s holds %q, want %q", c.id, got, c.want)
+		}
+	}
+}

@@ -2,13 +2,15 @@
 
 ```
 MCP client ──bearer──> /mcp ──> mcpserver ──> vault ──> keys
-program ─────────────> /v1/links, /v1/upload ─┘   └───> bitwarden ──> Vaultwarden
+program ─────────────> /v1/links, /v1/upload ─┘ │  └───> bitwarden ──> Vaultwarden
+                                                └──> vwadmin ──> Vaultwarden /admin   (server mode)
 ```
 
 | Package | Responsibility |
 |---|---|
 | `keys` | master key (PBKDF2, Argon2id), EncString and attachment buffers, RSA-OAEP key wrapping, Send keys, fingerprint phrases |
 | `bitwarden` | HTTP API: encrypted payloads only, bounded reads, status codes as errors |
+| `vwadmin` | admin panel of the server mode: token login, session cookie, accounts and organizations |
 | `vault` | session, decrypted snapshot, name resolution, items, attachments, Sends, organization, search, checks |
 | `access` | client tokens, per-client narrowing, throttling of failing sources |
 | `links` | one-time link table |
@@ -56,6 +58,17 @@ Secrets of items whose collection hides passwords, or marked for re-prompt, take
 
 ## Organization
 
+- Admin mode manages every organization the account owns or administers, within `VWMCP_ORGANIZATION`. With one such organization the tools need no argument; with several they take `organization`.
+- `set_item_collections` acts in the item's own organization and never moves an item to another one.
 - Admin changes need write enabled and a client not narrowed to collections.
 - Owner and admin roles are not granted, changed or removed without `VWMCP_ALLOW_ADMIN_ROLES`; invitations can be limited to domains.
 - `confirm_member` returns the member's fingerprint phrase first — HKDF of SHA-256 of the public key with the user id, five words of the EFF list — and confirms only when called again with it.
+
+## Server mode
+
+- No account and no vault: the instance logs in to `/admin` with the admin token and keeps the session cookie; a refused session is renewed once, shared by concurrent requests, since the server throttles panel logins.
+- The panel routes its POST actions only for a JSON content type; every action sends one.
+- The panel lists no organizations a program can read; they are collected from the organizations of every account.
+- The panel's configuration dump carries the server's secrets (admin token, SMTP and Duo keys) and has no tool.
+- `delete_user` refuses the only confirmed owner of an organization; `delete_user` and `delete_organization` act only when called again with the account's email or the organization's exact name.
+- Settings of the vault modes (account key, links, reveal, share, organizations, collection-narrowed clients) are refused at startup rather than ignored.

@@ -324,6 +324,14 @@ func (s *Snapshot) CollectionName(id string) string {
 	return id
 }
 
+// OrganizationName returns the name of an organization id, or the id itself.
+func (s *Snapshot) OrganizationName(id string) string {
+	if o, ok := s.Organization(id); ok {
+		return o.Name
+	}
+	return id
+}
+
 // Organization returns a membership by id.
 func (s *Snapshot) Organization(id string) (Organization, bool) {
 	for _, o := range s.Organizations {

@@ -153,6 +153,7 @@ func detail(snap *vault.Snapshot, it *vault.Item, cfg *config.Config) itemDetail
 type collectionView struct {
 	ID            string             `json:"id"`
 	Name          string             `json:"name"`
+	Organization  string             `json:"organization,omitempty"`
 	Items         int                `json:"items"`
 	ReadOnly      bool               `json:"read_only,omitempty"`
 	HidePasswords bool               `json:"hide_passwords,omitempty"`

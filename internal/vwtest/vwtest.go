@@ -51,6 +51,17 @@ func ServerURL(t *testing.T) string {
 	return u
 }
 
+// AdminToken returns the admin panel token of the test server, skipping the
+// test when none is set.
+func AdminToken(t *testing.T) string {
+	t.Helper()
+	tok := os.Getenv("VWTEST_ADMIN_TOKEN")
+	if tok == "" {
+		t.Skip("VWTEST_ADMIN_TOKEN is not set")
+	}
+	return tok
+}
+
 // token holds the access token of a test account for its client.
 type token struct{ value string }
 

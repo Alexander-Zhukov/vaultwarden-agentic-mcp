@@ -86,6 +86,8 @@ type Server struct {
 	failSyncIn int
 	// failUpload makes the next attachment upload fail.
 	failUpload bool
+	// panel is the admin panel; nil until EnableAdmin.
+	panel *panel
 }
 
 // New starts a fake server; it stops with the test.
@@ -235,6 +237,7 @@ func (s *Server) authed(h func(w http.ResponseWriter, r *http.Request, a *Accoun
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
+	s.adminRoutes(mux)
 	mux.HandleFunc("POST /identity/connect/token", s.token)
 	mux.HandleFunc("GET /api/sync", s.authed(s.sync))
 	mux.HandleFunc("POST /api/ciphers/create", s.authed(s.createCipher))

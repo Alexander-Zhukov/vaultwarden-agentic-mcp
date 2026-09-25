@@ -13,7 +13,7 @@ Encryption is done in the server, as in the official clients; Vaultwarden stores
 | Tool | Description |
 |---|---|
 | `get_status` | Account, mode, visible collections, enabled capabilities |
-| `list_collections` | Collections with item counts and access; members in admin mode |
+| `list_collections` | Collections with their organization, item counts and access; members in admin mode |
 | `list_items` | Item metadata by collection, type or trash |
 | `search_items` | Find items by name, username, URI, notes, field names; never searches values |
 | `get_item` | Everything except secret values: notes, fields, attachments, SSH public key, fingerprints |
@@ -32,6 +32,7 @@ Encryption is done in the server, as in the official clients; Vaultwarden stores
 | `delete_attachment` | Remove an attachment |
 | `get_secret` | Return one value to the model |
 | `get_attachment` | Return an attachment to the model |
+| `list_organizations` | Admin: the account's organizations, its role, which ones this instance manages |
 | `list_members` | Admin: members, roles, collection access |
 | `invite_member` | Admin: invite with a role and collections |
 | `confirm_member` | Admin: confirm after comparing the fingerprint phrase |
@@ -42,6 +43,21 @@ Encryption is done in the server, as in the official clients; Vaultwarden stores
 | `delete_collection` | Admin: delete an empty collection |
 | `set_item_collections` | Admin: move an item between collections |
 | `list_events` | Admin: organization event log |
+
+Admin tools take an `organization` argument when the instance manages several.
+
+Server mode has a tool set of its own:
+
+| Tool | Description |
+|---|---|
+| `get_status` | Server, account and organization counts, enabled capabilities |
+| `list_users` | Accounts with status, two-step login, last activity, organizations |
+| `get_user` | One account by email or id |
+| `list_organizations` | Every organization of the server with members and owners |
+| `invite_user` | Invited account for an address, so the person can register with sign-ups closed |
+| `change_user` | Disable, enable, end every session, resend the invitation |
+| `delete_user` | Delete an account; two steps, refused for the only owner of an organization |
+| `delete_organization` | Delete an organization with its contents; two steps, confirmed by its name |
 
 Tools of a disabled capability are not registered. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`).
 
@@ -64,31 +80,39 @@ share_with_human(item="WIFI", max_access=1)
 
 One process serves one Vaultwarden account; the account's membership is the boundary of what it can reach. Several agents may share an instance with their own bearer tokens, each optionally narrowed to read-only use or to some collections.
 
-`VWMCP_MODE=consumer` works with items. `VWMCP_MODE=admin` adds organization management and needs an owner or admin account.
+| Mode | Acts as | Does |
+|---|---|---|
+| `consumer` | an account | items of its collections |
+| `admin` | an owner or admin account | also members, collections and events of its organizations; `VWMCP_ORGANIZATION` narrows which |
+| `server` | the admin token | accounts and organizations of the whole server, through the admin panel; no vault contents |
+
+A server-mode instance holds the key to every account of the server; run it separately from the vault instances, with its own clients.
 
 ## Setup
 
 ### Prerequisites
 
 - Vaultwarden (tested with 1.36)
-- An account with a personal API key (Settings → Security → Keys → API key) and its master password
+- An account with a personal API key (Settings → Security → Keys → API key) and its master password; for server mode, the server's `ADMIN_TOKEN` instead
 
 ### Environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `VWMCP_SERVER_URL` | Yes | — | Vaultwarden URL |
-| `VWMCP_CLIENT_ID` | Yes | — | API key client id (`user.<uuid>`) |
-| `VWMCP_CLIENT_SECRET` | Yes | — | API key client secret |
-| `VWMCP_MASTER_PASSWORD` | Yes | — | Master password |
+| `VWMCP_CLIENT_ID` | Yes, not in server mode | — | API key client id (`user.<uuid>`) |
+| `VWMCP_CLIENT_SECRET` | Yes, not in server mode | — | API key client secret |
+| `VWMCP_MASTER_PASSWORD` | Yes, not in server mode | — | Master password |
+| `VWMCP_ADMIN_TOKEN` | Server mode only | — | The server's `ADMIN_TOKEN` in plain form |
 | `VWMCP_CLIENTS` | Yes (http) | — | `name:sha256(token)[:read_only][:collections=a\|b]`, comma-separated |
-| `VWMCP_MODE` | No | `consumer` | `consumer` or `admin` |
+| `VWMCP_MODE` | No | `consumer` | `consumer`, `admin` or `server` |
+| `VWMCP_ORGANIZATION` | No | all | Organizations admin mode manages, names or ids, comma-separated |
 | `VWMCP_ALLOW_WRITE` | No | `false` | Create, change and delete items; admin changes |
 | `VWMCP_ALLOW_SHARE` | No | `false` | `share_with_human` (with write) |
 | `VWMCP_ALLOW_REVEAL` | No | `false` | `get_secret`, `get_attachment` |
-| `VWMCP_ALLOW_PERMANENT_DELETE` | No | `false` | Delete without the trash |
+| `VWMCP_ALLOW_PERMANENT_DELETE` | No | `false` | Delete without the trash; in server mode, delete accounts and organizations |
 | `VWMCP_ALLOW_ADMIN_ROLES` | No | `false` | Grant or change owner and admin |
-| `VWMCP_INVITE_DOMAINS` | No | any | Domains `invite_member` may invite |
+| `VWMCP_INVITE_DOMAINS` | No | any | Domains `invite_member` and `invite_user` may invite |
 | `VWMCP_PUBLIC_URL` | No | — | How clients reach this server; enables one-time links |
 | `VWMCP_LINK_SOURCES` | No | any | Addresses or CIDRs allowed to redeem links |
 | `VWMCP_NOTES_PREFIXES` | No | — | Lines every item's notes must have, for `check_items` |

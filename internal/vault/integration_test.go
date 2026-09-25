@@ -44,7 +44,7 @@ func TestLiveVault(t *testing.T) {
 	org := owner.NewOrganization(ctx, t, "Machine", "infra")
 	v := open(t, owner)
 
-	admin, err := v.Admin(ctx, "")
+	admin, err := v.Admin(ctx, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
