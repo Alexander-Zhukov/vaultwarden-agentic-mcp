@@ -23,12 +23,16 @@ import (
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/links"
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/obs"
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/vault"
+	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/vwadmin"
 )
 
 // Deps are everything the MCP layer needs.
 type Deps struct {
-	Config  *config.Config
-	Vault   *vault.Vault
+	Config *config.Config
+	// Vault serves the consumer and admin modes.
+	Vault *vault.Vault
+	// Admin serves the server mode.
+	Admin   *vwadmin.Client
 	Links   *links.Store
 	Metrics *obs.Metrics
 	Logger  *slog.Logger
@@ -46,7 +50,11 @@ func (d Deps) validate() error {
 	if d.Config == nil || d.Config.Location == nil {
 		missing = append(missing, "Config")
 	}
-	if d.Vault == nil {
+	if d.Config != nil && d.Config.Mode == config.ModeServer {
+		if d.Admin == nil {
+			missing = append(missing, "Admin")
+		}
+	} else if d.Vault == nil {
 		missing = append(missing, "Vault")
 	}
 	if d.Links == nil {
@@ -73,6 +81,7 @@ type server struct {
 	registered []string
 	shares     *shareBook
 	searches   *rateLimiter
+	confirms   *confirmBook
 }
 
 // New builds the MCP server with the tools this instance's mode and switches
@@ -82,11 +91,24 @@ func New(deps Deps) (*mcp.Server, []string, error) {
 	if err := deps.validate(); err != nil {
 		return nil, nil, err
 	}
-	s := &server{Deps: deps, shares: newShareBook(), searches: newRateLimiter(deps.Config.Tuning.FindPerMinute, time.Minute, deps.Clock)}
+	s := &server{
+		Deps: deps, shares: newShareBook(), confirms: newConfirmBook(deps.Clock),
+		searches: newRateLimiter(deps.Config.Tuning.FindPerMinute, time.Minute, deps.Clock),
+	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "vaultwarden-agentic-mcp", Version: deps.Version}, &mcp.ServerOptions{
 		Instructions: instructions(deps.Config),
 	})
 	caps := deps.Config.Caps
+	if deps.Config.Mode == config.ModeServer {
+		s.registerServerRead(srv)
+		if caps.AllowWrite {
+			s.registerServerWrite(srv)
+			if caps.AllowPermanentDelete {
+				s.registerServerDelete(srv)
+			}
+		}
+		return srv, s.registered, nil
+	}
 	s.registerRead(srv)
 	s.registerValues(srv)
 	if caps.AllowWrite {
@@ -106,6 +128,14 @@ func New(deps Deps) (*mcp.Server, []string, error) {
 
 // instructions is the server-level guidance clients show the model once.
 func instructions(cfg *config.Config) string {
+	if cfg.Mode == config.ModeServer {
+		text := "Vaultwarden server administration: the accounts and organizations of the server, through its " +
+			"admin panel. No vault contents or secret values are reachable from this instance."
+		if !cfg.Caps.AllowWrite {
+			text += " This instance is read-only."
+		}
+		return text
+	}
 	var b strings.Builder
 	b.WriteString("Vaultwarden secrets for agents. Tools return names, metadata and fingerprints, never values, " +
 		"unless a tool says otherwise. Items are addressed by name, optionally within a collection; a name that " +
@@ -167,7 +197,7 @@ func addTool[In, Out any](s *server, srv *mcp.Server, tool *mcp.Tool, handler fu
 			outcome = obs.OutcomeError
 			var zero Out
 			out = zero
-			err = publicError(err)
+			err = publicError(err, s.Config.Mode)
 		}
 		s.Metrics.ToolCalls.WithLabelValues(tool.Name, c.principal.Name, outcome).Inc()
 		c.log(ctx, err)
@@ -305,15 +335,17 @@ func (c *call) collectionIDs(ctx context.Context, refs []string) ([]string, erro
 }
 
 // publicError marks errors that do not come from the service's own policy as
-// vault failures. Their text is kept because it is what makes a failure
-// actionable; transport errors carry no URL (the client strips it) and no
-// error in this service is built from a secret value.
-func publicError(err error) error {
+// failures of the server behind it. Their text is kept because it is what
+// makes a failure actionable; transport errors carry no URL (both clients
+// strip it) and no error in this service is built from a secret value.
+func publicError(err error, mode config.Mode) error {
 	switch {
 	case errors.Is(err, vault.ErrNotFound), errors.Is(err, vault.ErrAmbiguous), errors.Is(err, vault.ErrInvalid),
 		errors.Is(err, vault.ErrReadOnly), errors.Is(err, vault.ErrConflict), errors.Is(err, vault.ErrTooLarge),
 		errors.Is(err, vault.ErrUnknownType), errors.Is(err, errDisabled):
 		return err
+	case mode == config.ModeServer:
+		return fmt.Errorf("server: %w", err)
 	default:
 		return fmt.Errorf("vault: %w", err)
 	}

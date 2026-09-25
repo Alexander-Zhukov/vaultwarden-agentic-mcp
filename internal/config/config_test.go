@@ -88,7 +88,7 @@ func TestLoadRejects(t *testing.T) {
 	}{
 		{"missing required", map[string]string{"VWMCP_SERVER_URL": "", "VWMCP_CLIENT_SECRET": ""}, "VWMCP_CLIENT_SECRET"},
 		{"plain http server", map[string]string{"VWMCP_SERVER_URL": "http://vault.example.test"}, "must use https"},
-		{"bad mode", map[string]string{"VWMCP_MODE": "root"}, "consumer or admin"},
+		{"bad mode", map[string]string{"VWMCP_MODE": "root"}, "consumer, admin or server"},
 		{"no clients", map[string]string{"VWMCP_CLIENTS": ""}, "at least one client"},
 		{"bad hash", map[string]string{"VWMCP_CLIENTS": "a:1234"}, "64 hex"},
 		{"duplicate client", map[string]string{"VWMCP_CLIENTS": "a:" + hashA + ",a:" + hashA}, "twice"},

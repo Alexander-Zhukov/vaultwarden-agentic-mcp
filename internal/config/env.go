@@ -137,14 +137,14 @@ func (r *envReader) durationOr(name string, fallback time.Duration) time.Duratio
 	return value
 }
 
-// listOr reads a comma-separated value. The "-" sentinel spells an empty list,
-// so "no restriction" is always visible in the environment rather than implied
-// by an empty string.
-func (r *envReader) listOr(name string, fallback []string) []string {
+// list reads a comma-separated value; unset is the empty list. The "-"
+// sentinel spells an empty list too, so "no restriction" can be visible in the
+// environment rather than implied by an empty string.
+func (r *envReader) list(name string) []string {
 	raw, ok := r.value(name)
 	if !ok {
-		r.noteDefault(name, describeList(fallback))
-		return fallback
+		r.noteDefault(name, describeList(nil))
+		return nil
 	}
 	if raw == "-" {
 		return nil
@@ -158,7 +158,7 @@ func (r *envReader) listOr(name string, fallback []string) []string {
 	}
 	if len(items) == 0 {
 		r.fail(name, `must list at least one value, or "-" to disable the restriction`)
-		return fallback
+		return nil
 	}
 	return items
 }

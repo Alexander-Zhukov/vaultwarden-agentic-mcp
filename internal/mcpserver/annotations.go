@@ -24,19 +24,21 @@ var toolClasses = map[string]toolClass{
 	"get_status": classRead, "list_collections": classRead, "list_items": classRead,
 	"search_items": classRead, "get_item": classRead, "find_by_value": classRead,
 	"find_copies": classRead, "check_items": classRead, "list_members": classRead,
-	"list_events": classRead,
+	"list_events": classRead, "list_organizations": classRead, "list_users": classRead,
+	"get_user": classRead,
 
 	"get_secret": classExport, "get_attachment": classExport, "issue_value_link": classExport,
 	"share_with_human": classExport,
 
 	"create_item": classWrite, "restore_item": classWrite, "add_attachment": classWrite,
 	"request_value_upload": classWrite, "invite_member": classWrite, "confirm_member": classWrite,
-	"create_collection": classWrite,
+	"create_collection": classWrite, "invite_user": classWrite,
 
 	"update_item": classDestructive, "delete_item": classDestructive, "delete_attachment": classDestructive,
 	"revoke_share": classDestructive, "set_item_collections": classDestructive,
 	"update_member": classDestructive, "change_member": classDestructive,
 	"update_collection": classDestructive, "delete_collection": classDestructive,
+	"change_user": classDestructive, "delete_user": classDestructive, "delete_organization": classDestructive,
 }
 
 func annotationsFor(name string) *mcp.ToolAnnotations {

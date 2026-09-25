@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -69,40 +70,65 @@ func (s *server) registerRead(srv *mcp.Server) {
 		return out, nil
 	})
 
+	type listCollectionsInput struct {
+		Organization string `json:"organization,omitempty" jsonschema:"optional organization name or id, to list only its collections"`
+	}
 	type listCollectionsOutput struct {
 		Collections []collectionView `json:"collections"`
 	}
 	addTool(s, srv, &mcp.Tool{
 		Name: "list_collections",
-		Description: "List the collections you can see with their item counts and your access. " +
-			"In admin mode this lists every collection of the organization with its members.",
-	}, func(ctx context.Context, c *call, _ struct{}) (listCollectionsOutput, error) {
+		Description: "List the collections you can see with their organization, item counts and your access. " +
+			"In admin mode this lists every collection of the managed organizations with its members.",
+	}, func(ctx context.Context, c *call, in listCollectionsInput) (listCollectionsOutput, error) {
 		snap, err := c.snapshot(ctx)
 		if err != nil {
 			return listCollectionsOutput{}, err
 		}
 		out := listCollectionsOutput{Collections: []collectionView{}}
 		if s.Config.Mode == config.ModeAdmin && c.principal.Unrestricted() {
-			admin, err := s.Vault.Admin(ctx, s.Config.Organization)
+			orgs, err := s.Vault.Organizations(ctx, s.Config.Organizations)
 			if err != nil {
 				return listCollectionsOutput{}, err
 			}
-			cols, err := admin.Collections(ctx)
-			if err != nil {
-				return listCollectionsOutput{}, err
-			}
-			for _, col := range cols {
-				v := collectionView{ID: col.ID, Name: col.Name, Items: col.Items}
-				for _, m := range col.Members {
-					v.Members = append(v.Members, memberAccessView{Member: m.Member, ReadOnly: m.ReadOnly, HidePasswords: m.HidePasswords, Manage: m.Manage})
+			if in.Organization != "" {
+				// A filter naming an unknown or unmanaged organization is an
+				// error, not an empty list.
+				admin, err := s.Vault.Admin(ctx, in.Organization, s.Config.Organizations)
+				if err != nil {
+					return listCollectionsOutput{}, err
 				}
-				out.Collections = append(out.Collections, v)
+				in.Organization = admin.OrganizationID()
+			}
+			for _, o := range orgs {
+				if !o.Managed || (in.Organization != "" && o.ID != in.Organization) {
+					continue
+				}
+				admin, err := s.Vault.Admin(ctx, o.ID, s.Config.Organizations)
+				if err != nil {
+					return listCollectionsOutput{}, err
+				}
+				cols, err := admin.Collections(ctx)
+				if err != nil {
+					return listCollectionsOutput{}, err
+				}
+				for _, col := range cols {
+					v := collectionView{ID: col.ID, Name: col.Name, Organization: o.Name, Items: col.Items}
+					for _, m := range col.Members {
+						v.Members = append(v.Members, memberAccessView{Member: m.Member, ReadOnly: m.ReadOnly, HidePasswords: m.HidePasswords, Manage: m.Manage})
+					}
+					out.Collections = append(out.Collections, v)
+				}
 			}
 			return out, nil
 		}
 		for _, col := range snap.Collections {
+			org := snap.OrganizationName(col.OrganizationID)
+			if !matchesOrg(col.OrganizationID, org, in.Organization) {
+				continue
+			}
 			out.Collections = append(out.Collections, collectionView{
-				ID: col.ID, Name: col.Name, Items: countItems(snap, col.ID),
+				ID: col.ID, Name: col.Name, Organization: org, Items: countItems(snap, col.ID),
 				ReadOnly: col.ReadOnly, HidePasswords: col.HidePasswords, Manage: col.Manage,
 			})
 		}
@@ -318,4 +344,10 @@ func clampTTL(requested string, fallback, limit time.Duration) (time.Duration, e
 		return 0, fmt.Errorf("%w: ttl %q is not a positive duration such as 90s or 10m", vault.ErrInvalid, requested)
 	}
 	return min(d, limit), nil
+}
+
+// matchesOrg reports whether an organization is the one a filter names; an
+// empty filter matches every organization.
+func matchesOrg(id, name, filter string) bool {
+	return filter == "" || id == filter || strings.EqualFold(name, filter)
 }

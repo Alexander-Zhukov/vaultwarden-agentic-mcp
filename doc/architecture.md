@@ -2,13 +2,15 @@
 
 ```
 MCP client ──bearer──> /mcp ──> mcpserver ──> vault ──> keys
-program ─────────────> /v1/links, /v1/upload ─┘   └───> bitwarden ──> Vaultwarden
+program ─────────────> /v1/links, /v1/upload ─┘ │  └───> bitwarden ──> Vaultwarden
+                                                └──> vwadmin ──> Vaultwarden /admin   (server mode)
 ```
 
 | Package | Responsibility |
 |---|---|
 | `keys` | master key (PBKDF2, Argon2id), EncString and attachment buffers, RSA-OAEP key wrapping, Send keys, fingerprint phrases |
 | `bitwarden` | HTTP API: encrypted payloads only, bounded reads, status codes as errors |
+| `vwadmin` | admin panel of the server mode: token login, session cookie, accounts and organizations |
 | `vault` | session, decrypted snapshot, name resolution, items, attachments, Sends, organization, search, checks |
 | `access` | client tokens, per-client narrowing, throttling of failing sources |
 | `links` | one-time link table |
@@ -56,6 +58,21 @@ Secrets of items whose collection hides passwords, or marked for re-prompt, take
 
 ## Organization
 
+- Admin mode manages every organization the account owns or administers, within `VWMCP_ORGANIZATION`. With one such organization the tools need no argument; with several they take `organization`.
+- `VWMCP_ORGANIZATION` matches exactly: an id-shaped entry only an id, a name only one organization of exactly that name. Anyone on the server can create an organization and invite this account, so look-alike names never widen the list. An id given to a tool wins over names.
+- Collection names are looked up within the organization being managed; names repeat across organizations.
+- A manager of every collection is the custom type with three permissions in Vaultwarden; updates send it back that way, since the server derives the access from them.
+- `set_item_collections` acts in the item's own organization and never moves an item to another one.
 - Admin changes need write enabled and a client not narrowed to collections.
 - Owner and admin roles are not granted, changed or removed without `VWMCP_ALLOW_ADMIN_ROLES`; invitations can be limited to domains.
 - `confirm_member` returns the member's fingerprint phrase first — HKDF of SHA-256 of the public key with the user id, five words of the EFF list — and confirms only when called again with it.
+
+## Server mode
+
+- No account and no vault: the instance logs in to `/admin` with the admin token and keeps the session cookie. A refused session is renewed once, shared by concurrent requests. A failed login is answered from memory until a growing backoff has passed: the server throttles panel logins (a burst of three, then one per five minutes) and logs every refused token.
+- The panel routes its POST actions only for a JSON content type; every action sends one.
+- The panel lists no organizations a program can read; they are collected from the organizations of every account, which the panel reports for confirmed memberships only. An organization without a confirmed member is therefore not listed; `delete_organization` takes its id.
+- The panel's configuration dump carries the server's secrets (admin token, SMTP and Duo keys) and has no tool.
+- `delete_user` and `delete_organization` act in two calls: the first returns a random code bound to the tool, the target and the client, valid for five minutes and once; the second must bring it back. A code cannot be derived from the target, so an agent cannot skip the first look.
+- `delete_user` refuses the last confirmed owner of an organization (the server refuses it too) and its last confirmed member, whose deletion would leave the organization unlisted.
+- Every setting that needs an account — the account key, organizations, links, reveal, share, checks and the sync and link tuning — and collection-narrowed clients are refused at startup rather than ignored.

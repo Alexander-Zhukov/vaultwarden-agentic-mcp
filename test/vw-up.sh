@@ -10,6 +10,8 @@ DIR=${VWTEST_DIR:-$(pwd)/.vwtest}
 PORT=${VWTEST_PORT:-18100}
 IMAGE=${VWTEST_VW_IMAGE:-vaultwarden/server:1.36.0}
 NAME=${VWTEST_NAME:-vaultwarden-agentic-mcp-test}
+# The admin panel token of the throwaway server; a plain token is fine here.
+ADMIN_TOKEN=${VWTEST_ADMIN_TOKEN:-vwtest-admin-token}
 
 mkdir -p "$DIR"
 if [ ! -f "$DIR/server.crt" ]; then
@@ -33,6 +35,9 @@ docker run -d --name "$NAME" -p "127.0.0.1:$PORT:80" -v "$DIR:/tls:ro" \
 	-e ORG_EVENTS_ENABLED=true \
 	-e LOGIN_RATELIMIT_MAX_BURST=1000 \
 	-e LOGIN_RATELIMIT_SECONDS=1 \
+	-e ADMIN_TOKEN="$ADMIN_TOKEN" \
+	-e ADMIN_RATELIMIT_MAX_BURST=1000 \
+	-e ADMIN_RATELIMIT_SECONDS=1 \
 	"$IMAGE" >/dev/null
 
 i=0
@@ -44,3 +49,4 @@ done
 
 echo "export VWTEST_URL=https://127.0.0.1:$PORT"
 echo "export VWTEST_CA=$DIR/ca.crt"
+echo "export VWTEST_ADMIN_TOKEN=$ADMIN_TOKEN"

@@ -22,6 +22,7 @@ import (
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/mcpserver"
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/obs"
 	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/vault"
+	"github.com/Alexander-Zhukov/vaultwarden-agentic-mcp/internal/vwadmin"
 )
 
 type bearer struct {
@@ -59,6 +60,9 @@ type setup struct {
 	mode      config.Mode
 	readOnly  bool
 	sources   []netip.Prefix
+	// adminToken starts the instance in server mode.
+	adminToken      string
+	permanentDelete bool
 }
 
 func start(t *testing.T, s setup) *harness {
@@ -85,7 +89,7 @@ func start(t *testing.T, s setup) *harness {
 	cfg := &config.Config{
 		Account: "test", Mode: s.mode, Transport: config.TransportHTTP,
 		Vaultwarden: config.Vaultwarden{URL: s.serverURL, WebURL: s.serverURL},
-		Caps:        config.Capabilities{AllowWrite: !s.readOnly, AllowReveal: s.reveal, AllowShare: true},
+		Caps:        config.Capabilities{AllowWrite: !s.readOnly, AllowReveal: s.reveal, AllowShare: s.mode != config.ModeServer, AllowPermanentDelete: s.permanentDelete},
 		Links:       config.Links{PublicURL: srv.URL, TTL: time.Minute, UploadTTL: time.Minute, Sources: s.sources},
 		ShareTTL:    time.Hour, MaxShareTTL: 24 * time.Hour,
 		Checks:  config.Checks{NotesPrefixes: []string{"Description:"}, ExpiryField: "expires", ExpiryHorizon: 14 * 24 * time.Hour},
@@ -93,23 +97,36 @@ func start(t *testing.T, s setup) *harness {
 		Tuning: config.Tuning{FindPerMinute: 30, MaxUploadValue: 1 << 20, MaxLinks: 1024, AuthMaxSources: 64},
 	}
 	h.cfg = cfg
-	v, err := vault.New(vault.Config{
-		Server:             bitwarden.Config{BaseURL: s.serverURL, Timeout: 30 * time.Second, MaxResponseBytes: 32 << 20},
-		Credentials:        s.creds,
-		TokenMargin:        5 * time.Minute,
-		BackoffMin:         time.Second,
-		BackoffMax:         time.Second,
-		DeviceName:         "mcp-test",
-		SyncTTL:            time.Minute,
-		MaxAttachmentBytes: 1 << 20,
-		Clock:              time.Now,
-	})
+	h.metrics = obs.NewMetrics()
+	var (
+		v     *vault.Vault
+		admin *vwadmin.Client
+		err   error
+	)
+	if s.mode == config.ModeServer {
+		cfg.Links = config.Links{}
+		admin, err = vwadmin.New(vwadmin.Config{
+			BaseURL: s.serverURL, Token: config.Secret(s.adminToken), Timeout: 30 * time.Second,
+			MaxResponseBytes: 32 << 20, UserAgent: "mcp-test", BackoffMin: time.Second, BackoffMax: time.Second,
+		})
+	} else {
+		v, err = vault.New(vault.Config{
+			Server:             bitwarden.Config{BaseURL: s.serverURL, Timeout: 30 * time.Second, MaxResponseBytes: 32 << 20},
+			Credentials:        s.creds,
+			TokenMargin:        5 * time.Minute,
+			BackoffMin:         time.Second,
+			BackoffMax:         time.Second,
+			DeviceName:         "mcp-test",
+			SyncTTL:            time.Minute,
+			MaxAttachmentBytes: 1 << 20,
+			Clock:              time.Now,
+		})
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.metrics = obs.NewMetrics()
 	deps := mcpserver.Deps{
-		Config: cfg, Vault: v, Links: links.NewStore(time.Now, 1024), Metrics: h.metrics,
+		Config: cfg, Vault: v, Admin: admin, Links: links.NewStore(time.Now, 1024), Metrics: h.metrics,
 		Logger: slog.New(slog.DiscardHandler), Clock: time.Now,
 		Local: access.Principal{Name: "local"}, StartedAt: time.Now(), Version: "test",
 	}

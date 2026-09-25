@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Admin mode manages every organization the account owns or administers.
+  Admin tools take `organization` when there are several; `list_organizations`
+  shows the account's organizations and which ones the instance manages;
+  `list_collections` names each collection's organization and can be filtered
+  by it. `VWMCP_ORGANIZATION` takes a comma-separated list of exact names or
+  ids.
+- Server mode (`VWMCP_MODE=server`, `VWMCP_ADMIN_TOKEN`): the accounts and
+  organizations of the whole server through the Vaultwarden admin panel.
+  `list_users`, `get_user` and `list_organizations`; `invite_user` and
+  `change_user` (disable, enable, deauthorize, resend the invitation) with
+  `VWMCP_ALLOW_WRITE`; `delete_user` and `delete_organization`, each in two
+  calls with a confirmation code, with `VWMCP_ALLOW_PERMANENT_DELETE`.
+
+### Changed
+- `VWMCP_ORGANIZATION` is split on commas and matches exactly; an organization
+  whose name contains a comma, or differs in case, is given by id.
+
 ## v1.0.0
 
 First release.

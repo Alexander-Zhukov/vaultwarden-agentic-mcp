@@ -282,12 +282,22 @@ func (v *Vault) sync(ctx context.Context) (*Snapshot, error) {
 // then case-insensitively; a name shared by two collections is an error that
 // lists both, never a guess.
 func (s *Snapshot) Collection(ref string) (Collection, error) {
+	return s.CollectionIn("", ref)
+}
+
+// CollectionIn is Collection within one organization; an empty orgID looks in
+// every organization. Names repeat across organizations, so a caller that
+// knows the organization must look only there.
+func (s *Snapshot) CollectionIn(orgID, ref string) (Collection, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return Collection{}, fmt.Errorf("%w: collection is required", ErrInvalid)
 	}
 	var exact, folded []Collection
 	for _, c := range s.Collections {
+		if orgID != "" && c.OrganizationID != orgID {
+			continue
+		}
 		switch {
 		case c.ID == ref:
 			return c, nil
@@ -320,6 +330,14 @@ func (s *Snapshot) CollectionName(id string) string {
 		if c.ID == id {
 			return c.Name
 		}
+	}
+	return id
+}
+
+// OrganizationName returns the name of an organization id, or the id itself.
+func (s *Snapshot) OrganizationName(id string) string {
+	if o, ok := s.Organization(id); ok {
+		return o.Name
 	}
 	return id
 }
