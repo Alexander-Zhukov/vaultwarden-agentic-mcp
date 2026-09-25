@@ -1,0 +1,94 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - depguard
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gocritic
+    - gosec
+    - govet
+    - makezero
+    - misspell
+    - nilerr
+    - noctx
+    - perfsprint
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - sloglint
+    - staticcheck
+    - unparam
+    - unused
+
+  settings:
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: github.com/pkg/errors
+              desc: use the standard errors package with %w wrapping
+            - pkg: github.com/sirupsen/logrus
+              desc: use log/slog
+            - pkg: math/rand
+              desc: secrets and tokens come from crypto/rand
+            - pkg: math/rand/v2
+              desc: secrets and tokens come from crypto/rand
+            - pkg: github.com/stretchr/testify
+              desc: standard testing with go-cmp; fakes at the seams, no mock frameworks
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: service code logs through slog; printing is reserved for cmd/ startup failures
+        - pattern: ^time\.Sleep$
+          msg: synchronise explicitly (channels, testing/synctest) instead of sleeping
+    sloglint:
+      no-mixed-args: true
+      kv-only: false
+      attr-only: true
+      static-msg: true
+      key-naming-case: snake
+    exhaustive:
+      default-signifies-exhaustive: true
+    revive:
+      rules:
+        - name: exported
+        - name: error-strings
+        - name: error-naming
+        - name: context-as-argument
+        - name: indent-error-flow
+        - name: unexported-return
+
+  exclusions:
+    rules:
+      # cmd/ is the one place allowed to print: the logger may not exist yet.
+      - path: ^cmd/
+        linters: [forbidigo]
+      # Tests may construct fixtures freely and are not held to production rules
+      # that exist to protect a long-running process.
+      - path: _test\.go$
+        linters: [gosec, noctx, unparam]
+      # vwtest provisions throwaway accounts for the integration suite and
+      # drives the official CLI through docker; it never ships in the binary.
+      - path: ^internal/vwtest/
+        linters: [gosec]
+
+formatters:
+  enable:
+    - gofumpt
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/Alexander-Zhukov/vaultwarden-agentic-mcp)
