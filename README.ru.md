@@ -94,7 +94,7 @@ share_with_human(item="WIFI", max_access=1)
 
 ### Требования
 
-- Vaultwarden (проверено на 1.36)
+- Vaultwarden (проверено на 1.37.5)
 - Аккаунт с персональным API-ключом (Settings → Security → Keys → API key) и его мастер-пароль; для режима server — вместо них `ADMIN_TOKEN` сервера
 
 ### Переменные окружения

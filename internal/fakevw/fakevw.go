@@ -403,6 +403,10 @@ func (s *Server) createCipher(w http.ResponseWriter, r *http.Request, a *Account
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if body.Cipher.EncryptedFor != a.ID {
+		fail(w, http.StatusUnprocessableEntity, "Invalid user cipher")
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if body.Cipher.OrganizationID == nil || len(body.CollectionIDs) == 0 {
@@ -419,7 +423,7 @@ func (s *Server) createCipher(w http.ResponseWriter, r *http.Request, a *Account
 	c := body.Cipher
 	c.ID, c.CollectionIDs = newID(), slices.Clone(body.CollectionIDs)
 	c.CreationDate, c.RevisionDate = s.stamp(), s.stamp()
-	c.LastKnownRevisionDate = ""
+	c.LastKnownRevisionDate, c.EncryptedFor = "", ""
 	s.ciphers[c.ID] = &cipher{c: c, files: map[string][]byte{}}
 	s.event(1100, a.ID, &c.ID, nil)
 	v, _ := s.view(s.ciphers[c.ID], a.ID)
@@ -451,6 +455,10 @@ func (s *Server) updateCipher(w http.ResponseWriter, r *http.Request, a *Account
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if body.EncryptedFor != a.ID {
+		fail(w, http.StatusUnprocessableEntity, "Invalid user cipher")
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.editable(w, r.PathValue("id"), a)
@@ -464,7 +472,7 @@ func (s *Server) updateCipher(w http.ResponseWriter, r *http.Request, a *Account
 	next := body
 	next.ID, next.CollectionIDs, next.Attachments = c.c.ID, c.c.CollectionIDs, c.c.Attachments
 	next.CreationDate, next.RevisionDate, next.OrganizationID = c.c.CreationDate, s.stamp(), c.c.OrganizationID
-	next.LastKnownRevisionDate = ""
+	next.LastKnownRevisionDate, next.EncryptedFor = "", ""
 	c.c = next
 	s.event(1101, a.ID, &next.ID, nil)
 	v, _ := s.view(c, a.ID)

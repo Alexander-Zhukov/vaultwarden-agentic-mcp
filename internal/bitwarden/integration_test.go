@@ -97,6 +97,7 @@ func TestLiveProtocol(t *testing.T) {
 		Notes:          enc("Description: test"),
 		Login:          &bitwarden.Login{Username: enc("bot"), Password: enc("s3cret")},
 		Fields:         []bitwarden.Field{{Name: enc("expires"), Value: enc("2027-01-01"), Type: bitwarden.FieldText}},
+		EncryptedFor:   sync.Profile.ID,
 	}, []string{org.CollectionID})
 	if err != nil {
 		t.Fatalf("create cipher: %v", err)

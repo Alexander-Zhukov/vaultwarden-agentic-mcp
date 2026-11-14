@@ -85,7 +85,7 @@ func TestLiveServerMode(t *testing.T) {
 	op := h.session(ctx, "op")
 
 	status := call(ctx, t, op, "get_status", nil, "")
-	if !strings.HasPrefix(status["server_version"].(string), "Vaultwarden 1.36") {
+	if !strings.HasPrefix(status["server_version"].(string), "Vaultwarden 1.37") {
 		t.Fatalf("status %v", status)
 	}
 	got := call(ctx, t, op, "get_user", map[string]any{"user": owner.Email}, "")

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Item writes (`create_item`, `update_item` and the tools built on them) send
+  `encryptedFor`, the account's id. Vaultwarden 1.37 requires it and answered
+  422 without it.
+- Account registration (provisioning and the integration suite) goes through
+  `register/send-verification-email` and `register/finish`; Vaultwarden 1.37
+  has no `/identity/accounts/register`. The integration suite runs on
+  Vaultwarden 1.37.5.
+- Built with Go 1.27.4: standard library fixes that govulncheck reports as
+  reachable (net/http, crypto/x509, crypto/tls, http2, html/template).
+
 ## v1.1.0
 
 ### Added
