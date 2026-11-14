@@ -20,7 +20,7 @@ jobs:
 
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.13.2
+          version: v2.15.0
           install-only: true
 
       - name: Build, format, vet, lint, tidy, tests with coverage gate, govulncheck
