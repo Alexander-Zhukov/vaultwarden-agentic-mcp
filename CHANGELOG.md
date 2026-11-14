@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.1
 
 ### Changed
 - Item writes (`create_item`, `update_item` and the tools built on them) send
