@@ -195,6 +195,10 @@ type Cipher struct {
 	DeletedDate     *string           `json:"deletedDate,omitempty"`
 	Edit            bool              `json:"edit,omitempty"`
 	ViewPassword    bool              `json:"viewPassword,omitempty"`
+	// EncryptedFor is the id of the account whose keys encrypted the item.
+	// Vaultwarden 1.37+ requires it on every write and refuses a write with
+	// another account's id (422).
+	EncryptedFor string `json:"encryptedFor,omitempty"`
 	// LastKnownRevisionDate makes an update fail instead of overwriting a
 	// change made elsewhere since the item was read.
 	LastKnownRevisionDate string `json:"lastKnownRevisionDate,omitempty"`

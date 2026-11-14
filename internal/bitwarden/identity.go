@@ -2,6 +2,7 @@ package bitwarden
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -97,6 +98,8 @@ type Registration struct {
 	Kdf                int                 `json:"kdf"`
 	KdfIterations      int                 `json:"kdfIterations"`
 	Keys               RegistrationKeyPair `json:"keys"`
+	// EmailVerificationToken is filled by Register from the first step.
+	EmailVerificationToken string `json:"emailVerificationToken"`
 }
 
 // RegistrationKeyPair is the account's RSA key pair.
@@ -105,12 +108,29 @@ type RegistrationKeyPair struct {
 	EncryptedPrivateKey string `json:"encryptedPrivateKey"`
 }
 
-// Register creates an account. Provisioning and tests only.
+// Register creates an account in two steps, as Vaultwarden 1.37+ requires:
+// the server issues a registration token (directly when it sends no mail),
+// then the account is created with it. Provisioning and tests only.
 func (c *Client) Register(ctx context.Context, reg Registration) error {
+	var token string
+	err := c.do(ctx, request{
+		op:     "register",
+		method: http.MethodPost,
+		url:    c.identity + "/accounts/register/send-verification-email",
+		body:   map[string]string{"email": reg.Email, "name": reg.Name},
+		out:    &token,
+	})
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return errors.New("register: the server sent a verification mail instead of a token")
+	}
+	reg.EmailVerificationToken = token
 	return c.do(ctx, request{
 		op:     "register",
 		method: http.MethodPost,
-		url:    c.identity + "/accounts/register",
+		url:    c.identity + "/accounts/register/finish",
 		body:   reg,
 	})
 }

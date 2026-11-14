@@ -94,7 +94,7 @@ A server-mode instance holds the key to every account of the server; run it sepa
 
 ### Prerequisites
 
-- Vaultwarden (tested with 1.36)
+- Vaultwarden (tested with 1.37.5)
 - An account with a personal API key (Settings → Security → Keys → API key) and its master password; for server mode, the server's `ADMIN_TOKEN` instead
 
 ### Environment variables

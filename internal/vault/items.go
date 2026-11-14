@@ -127,6 +127,7 @@ func (v *Vault) Create(ctx context.Context, n NewItem) (Item, error) {
 		if err != nil {
 			return err
 		}
+		c.EncryptedFor = snap.UserID
 		var resp *bitwarden.Cipher
 		err = v.retry(func() error {
 			var err error
@@ -170,6 +171,7 @@ func (v *Vault) Update(ctx context.Context, ref ItemRef, change func(*Item) erro
 		if err != nil {
 			return err
 		}
+		c.EncryptedFor = snap.UserID
 		var resp *bitwarden.Cipher
 		err = v.retry(func() error {
 			var err error

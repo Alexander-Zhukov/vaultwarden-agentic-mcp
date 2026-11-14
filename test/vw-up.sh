@@ -8,7 +8,7 @@ set -eu
 
 DIR=${VWTEST_DIR:-$(pwd)/.vwtest}
 PORT=${VWTEST_PORT:-18100}
-IMAGE=${VWTEST_VW_IMAGE:-vaultwarden/server:1.36.0}
+IMAGE=${VWTEST_VW_IMAGE:-vaultwarden/server:1.37.5}
 NAME=${VWTEST_NAME:-vaultwarden-agentic-mcp-test}
 # The admin panel token of the throwaway server; a plain token is fine here.
 ADMIN_TOKEN=${VWTEST_ADMIN_TOKEN:-vwtest-admin-token}

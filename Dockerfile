@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS build
 
 # Without a release VERSION the build stamps the VCS revision, which needs git.
 RUN apk add --no-cache git
